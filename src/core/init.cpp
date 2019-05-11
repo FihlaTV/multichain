@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2016 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #if defined(HAVE_CONFIG_H)
@@ -25,10 +25,11 @@
 #include "utils/util.h"
 #include "utils/utilmoneystr.h"
 #ifdef ENABLE_WALLET
-#include "wallet/db.h"
+#include "wallet/dbwrap.h"
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
 #endif
+#include "community/community.h"
 
 
 /* MCHN START */
@@ -36,7 +37,12 @@
 #include "structs/base58.h"
 #include "multichain/multichain.h"
 #include "wallet/wallettxs.h"
+#include "protocol/relay.h"
+#include "filters/filter.h"
+
 std::string BurnAddress(const std::vector<unsigned char>& vchVersion);
+std::string SetBannedTxs(std::string txlist);
+std::string SetLockedBlock(std::string hash);
 
 /* MCHN END */
 
@@ -61,7 +67,12 @@ using namespace std;
 CWallet* pwalletMain = NULL;
 mc_WalletTxs* pwalletTxsMain = NULL;
 #endif
+mc_RelayManager* pRelayManager = NULL;
+mc_FilterEngine* pFilterEngine = NULL;
+mc_MultiChainFilterEngine* pMultiChainFilterEngine = NULL;
+
 bool fFeeEstimatesInitialized = false;
+extern int JSON_DOUBLE_DECIMAL_DIGITS;                             
 
 #ifdef WIN32
 // Win32 LevelDB doesn't use filedescriptors, and the ones used for
@@ -82,6 +93,11 @@ enum BindFlags {
 
 static const char* FEE_ESTIMATES_FILENAME="fee_estimates.dat";
 CClientUIInterface uiInterface;
+
+//! -paytxfee will warn if called with a higher fee than this amount (in satoshis) per KB
+static const CAmount nHighTransactionFeeWarning = 0.01 * COIN;
+//! -maxtxfee will warn if called with a higher fee than this amount (in satoshis)
+static const CAmount nHighTransactionMaxFeeWarning = 100 * nHighTransactionFeeWarning;
 
 //////////////////////////////////////////////////////////////////////////////
 //
@@ -166,7 +182,7 @@ void Shutdown()
     StopRPCThreads();
 #ifdef ENABLE_WALLET
     if (pwalletMain)
-        bitdb.Flush(false);
+        bitdbwrap.Flush(false);
     GenerateBitcoins(false, NULL, 0);
 #endif
     StopNode();
@@ -199,21 +215,41 @@ void Shutdown()
     }
 #ifdef ENABLE_WALLET
     if (pwalletMain)
-        bitdb.Flush(true);
+        bitdbwrap.Flush(true);
 #endif
-#ifndef WIN32
+//#ifndef WIN32
     boost::filesystem::remove(GetPidFile());
-#endif
+//#endif
     UnregisterAllValidationInterfaces();
 #ifdef ENABLE_WALLET
     delete pwalletMain;
     pwalletMain = NULL;
 /* MCHN START */  
+    
     if(pwalletTxsMain)
     {
         delete pwalletTxsMain;
         pwalletTxsMain=NULL;
     }
+    if(pRelayManager)
+    {
+        delete pRelayManager;
+        pRelayManager=NULL;        
+    }
+    
+    if(pMultiChainFilterEngine)
+    {
+        delete pMultiChainFilterEngine;
+        pMultiChainFilterEngine=NULL;        
+    }
+
+    
+    if(pFilterEngine)
+    {
+        delete pFilterEngine;
+        pFilterEngine=NULL;        
+    }
+    
 /* MCHN END */  
 #endif
     globalVerifyHandle.reset();
@@ -236,6 +272,37 @@ void HandleSIGTERM(int)
     }
 #endif
 }
+
+string mc_ParseIPPort(string strAddr,int *port)
+{
+    *port=0;
+    string s_ip=strAddr;
+    size_t last_bracket=strAddr.find_last_of(']');
+    size_t last=strAddr.find_last_of(':');
+    string s_port;
+    
+    if( (last != string::npos) && ( (last_bracket == string::npos) || (last_bracket < last) ) )
+    {
+        s_ip=strAddr.substr(0,last);
+        s_port=strAddr.substr(last+1);
+        *port=atoi(s_port);
+    }
+/*    
+    stringstream ss(s_ip); 
+    string tok;
+    if(getline(ss, tok, ':'))
+    {
+        s_ip=tok;
+        if(getline(ss, tok, ':'))
+        {
+            *port=atoi(tok);
+        }
+    }            
+ */ 
+    return s_ip;
+}
+
+
 
 void HandleSIGHUP(int)
 {
@@ -285,12 +352,13 @@ std::string HelpMessage(HelpMessageMode mode)                                   
     strUsage += "  -datadir=<dir>         " + _("Specify data directory") + "\n";
     strUsage += "  -dbcache=<n>           " + strprintf(_("Set database cache size in megabytes (%d to %d, default: %d)"), nMinDbCache, nMaxDbCache, nDefaultDbCache) + "\n";
     strUsage += "  -loadblock=<file>      " + _("Imports blocks from external blk000??.dat file") + " " + _("on startup") + "\n";
+    strUsage += "  -loadblockmaxsize=<n>  " + _("Maximal block size in the files specified in -loadblock") + "\n";
     strUsage += "  -maxorphantx=<n>       " + strprintf(_("Keep at most <n> unconnectable transactions in memory (default: %u)"), DEFAULT_MAX_ORPHAN_TRANSACTIONS) + "\n";
     strUsage += "  -par=<n>               " + strprintf(_("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)"), -(int)boost::thread::hardware_concurrency(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS) + "\n";
 #ifndef WIN32
     strUsage += "  -pid=<file>            " + strprintf(_("Specify pid file (default: %s)"), "multichain.pid") + "\n";
 #endif
-    strUsage += "  -reindex               " + _("Rebuild block chain index from current blk000??.dat files") + " " + _("on startup") + "\n";
+    strUsage += "  -reindex               " + _("Rebuild the blockchain and reindex transactions on startup.") + "\n";
 #if !defined(WIN32)
     strUsage += "  -sysperms              " + _("Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)") + "\n";
     strUsage += "  -shortoutput           " + _("Returns connection string if this node can start or default multichain address otherwise") + "\n";
@@ -313,15 +381,17 @@ std::string HelpMessage(HelpMessageMode mode)                                   
     strUsage += "  -forcednsseed          " + strprintf(_("Always query for peer addresses via DNS lookup (default: %u)"), 0) + "\n";
     strUsage += "  -listen                " + _("Accept connections from outside (default: 1 if no -proxy or -connect)") + "\n";
     strUsage += "  -maxconnections=<n>    " + strprintf(_("Maintain at most <n> connections to peers (default: %u)"), 125) + "\n";
+    strUsage += "  -maxoutconnections=<n> " + strprintf(_("Open at most <n> outbound connections to peers (1-32, default: %u)"), 8) + "\n";
     strUsage += "  -maxreceivebuffer=<n>  " + strprintf(_("Maximum per-connection receive buffer, <n>*1000 bytes (default: %u)"), 5000) + "\n";
-    strUsage += "  -maxsendbuffer=<n>     " + strprintf(_("Maximum per-connection send buffer, <n>*1000 bytes (default: %u)"), 1000) + "\n";
+    strUsage += "  -maxsendbuffer=<n>     " + strprintf(_("Maximum per-connection send buffer, <n>*1000 bytes (default: %u)"), 100000) + "\n";
     strUsage += "  -onion=<ip:port>       " + strprintf(_("Use separate SOCKS5 proxy to reach peers via Tor hidden services (default: %s)"), "-proxy") + "\n";
     strUsage += "  -onlynet=<net>         " + _("Only connect to nodes in network <net> (ipv4, ipv6 or onion)") + "\n";
     strUsage += "  -permitbaremultisig    " + strprintf(_("Relay non-P2SH multisig (default: %u)"), 1) + "\n";
-    strUsage += "  -port=<port>           " + strprintf(_("Listen for connections on <port> (default: %u or testnet: %u)"), 8333, 18333) + "\n";
+    strUsage += "  -port=<port>           " + _("Listen for connections on <port> ") + "\n";
     strUsage += "  -proxy=<ip:port>       " + _("Connect through SOCKS5 proxy") + "\n";
     strUsage += "  -seednode=<ip>         " + _("Connect to a node to retrieve peer addresses, and disconnect") + "\n";
     strUsage += "  -timeout=<n>           " + strprintf(_("Specify connection timeout in milliseconds (minimum: 1, default: %d)"), DEFAULT_CONNECT_TIMEOUT) + "\n";
+/*    
 #ifdef USE_UPNP
 #if USE_UPNP
     strUsage += "  -upnp                  " + _("Use UPnP to map the listening port (default: 1 when listening)") + "\n";
@@ -329,6 +399,7 @@ std::string HelpMessage(HelpMessageMode mode)                                   
     strUsage += "  -upnp                  " + strprintf(_("Use UPnP to map the listening port (default: %u)"), 0) + "\n";
 #endif
 #endif
+ */ 
     strUsage += "  -whitebind=<addr>      " + _("Bind to given address and whitelist peers connecting to it. Use [host]:port notation for IPv6") + "\n";
     strUsage += "  -whitelist=<netmask>   " + _("Whitelist peers connecting from the given netmask or IP address. Can be specified multiple times.") + "\n";
     strUsage += "                         " + _("Whitelisted peers cannot be DoS banned and their transactions are always relayed, even if they are already in the mempool, useful e.g. for a gateway") + "\n";
@@ -336,7 +407,7 @@ std::string HelpMessage(HelpMessageMode mode)                                   
 #ifdef ENABLE_WALLET
     strUsage += "\n" + _("Wallet options:") + "\n";
     strUsage += "  -disablewallet         " + _("Do not load the wallet and disable wallet RPC calls") + "\n";
-    strUsage += "  -keypool=<n>           " + strprintf(_("Set key pool size to <n> (default: %u)"), 100) + "\n";
+    strUsage += "  -keypool=<n>           " + strprintf(_("Set key pool size to <n> (default: %u)"), 1) + "\n";
     if (GetBoolArg("-help-debug", false))
         strUsage += "  -mintxfee=<amt>        " + strprintf(_("Fees (in BTC/Kb) smaller than this are considered zero fee for transaction creation (default: %s)"), FormatMoney(CWallet::minTxFee.GetFeePerK())) + "\n";
     strUsage += "  -paytxfee=<amt>        " + strprintf(_("Fee (in BTC/kB) to add to transactions you send (default: %s)"), FormatMoney(payTxFee.GetFeePerK())) + "\n";
@@ -348,11 +419,12 @@ std::string HelpMessage(HelpMessageMode mode)                                   
     strUsage += "  -maxtxfee=<amt>        " + strprintf(_("Maximum total fees to use in a single wallet transaction, setting too low may abort large transactions (default: %s)"), FormatMoney(maxTxFee)) + "\n";
     strUsage += "  -upgradewallet         " + _("Upgrade wallet to latest format") + " " + _("on startup") + "\n";
     strUsage += "  -wallet=<file>         " + _("Specify wallet file (within data directory)") + " " + strprintf(_("(default: %s)"), "wallet.dat") + "\n";
-    strUsage += "  -walletnotify=<cmd>    " + _("Execute command when a wallet transaction changes (%s in cmd is replaced by TxID)") + "\n";
+    strUsage += "  -walletnotify=<cmd>    " + _("Execute this command when a transaction is first seen or confirmed, if it relates to an address in the wallet or a subscribed asset or stream. ") + "\n";
+    strUsage += "  -walletnotifynew=<cmd> " + _("Execute this command when a transaction is first seen, if it relates to an address in the wallet or a subscribed asset or stream. ") + "\n";
+    strUsage += "                         " + _("(more details and % substitutions online)") + "\n";
 /* MCHN START */    
-    strUsage += "  -walletdbversion=1|2   " + _("Specify wallet version, 1 - not scalable, 2 (default) - scalable") + "\n";
-    strUsage += "  -autosubscribe=streams|assets|\"streams,assets\"|\"assets,streams\" " + _("Automatically subscribe to new streams and/or assets") + "\n";
-    strUsage += "  -maxshowndata=<n>      " + strprintf(_("Any piece of data in an OP_RETURN longer than this is curtailed in API outputs and converted into an object (default: %u)"), MAX_OP_RETURN_SHOWN) + "\n";
+    strUsage += "  -walletdbversion=2|3   " + _("Specify wallet version, 2 - Berkeley DB, 3 (default) - proprietary") + "\n";
+    strUsage += "  -autosubscribe=streams|assets|\"streams,assets\"|\"assets,streams\"|\"\" " + _("Automatically subscribe to new streams and/or assets") + "\n";
 /* MCHN END */    
     strUsage += "  -zapwallettxes=<mode>  " + _("Delete all wallet transactions and only recover those parts of the blockchain through -rescan on startup") + "\n";
     strUsage += "                         " + _("(1 = keep tx meta data e.g. account owner and payment request information, 2 = drop tx meta data)") + "\n";
@@ -384,14 +456,15 @@ std::string HelpMessage(HelpMessageMode mode)                                   
     strUsage += "  -help-debug            " + _("Show all debugging options (usage: --help -help-debug)") + "\n";
     strUsage += "  -logips                " + strprintf(_("Include IP addresses in debug output (default: %u)"), 0) + "\n";
     strUsage += "  -logtimestamps         " + strprintf(_("Prepend debug output with timestamp (default: %u)"), 1) + "\n";
+    strUsage += "  -limitfreerelay=<n>    " + strprintf(_("Continuously rate-limit free transactions to <n>*1000 bytes per minute (default:%u)"), 0) + "\n";
     if (GetBoolArg("-help-debug", false))
     {
-        strUsage += "  -limitfreerelay=<n>    " + strprintf(_("Continuously rate-limit free transactions to <n>*1000 bytes per minute (default:%u)"), 15) + "\n";
         strUsage += "  -relaypriority         " + strprintf(_("Require high priority for relaying free or low-fee transactions (default:%u)"), 1) + "\n";
         strUsage += "  -maxsigcachesize=<n>   " + strprintf(_("Limit size of signature cache to <n> entries (default: %u)"), 50000) + "\n";
     }
     strUsage += "  -minrelaytxfee=<amt>   " + strprintf(_("Fees (in BTC/Kb) smaller than this are considered zero fee for relaying (default: %s)"), FormatMoney(::minRelayTxFee.GetFeePerK())) + "\n";
     strUsage += "  -printtoconsole        " + _("Send trace/debug info to console instead of debug.log file") + "\n";
+    strUsage += "  -logdir                " + _("Send trace/debug info to specified directory") + "\n";
     if (GetBoolArg("-help-debug", false))
     {
         strUsage += "  -printpriority         " + strprintf(_("Log transaction priority and fee per kB when mining blocks (default: %u)"), 0) + "\n";
@@ -418,7 +491,7 @@ std::string HelpMessage(HelpMessageMode mode)                                   
     strUsage += "\n" + _("Block creation options:") + "\n";
     strUsage += "  -blockminsize=<n>      " + strprintf(_("Set minimum block size in bytes (default: %u)"), 0) + "\n";
     strUsage += "  -blockmaxsize=<n>      " + strprintf(_("Set maximum block size in bytes (default: %d)"), DEFAULT_BLOCK_MAX_SIZE) + "\n";
-    strUsage += "  -blockprioritysize=<n> " + strprintf(_("Set maximum size of high-priority/low-fee transactions in bytes (default: %d)"), DEFAULT_BLOCK_PRIORITY_SIZE) + "\n";
+//    strUsage += "  -blockprioritysize=<n> " + strprintf(_("Set maximum size of high-priority/low-fee transactions in bytes (default: %d)"), DEFAULT_BLOCK_PRIORITY_SIZE) + "\n";
 
     strUsage += "\n" + _("RPC server options:") + "\n";
     strUsage += "  -server                " + _("Accept command line and JSON-RPC commands") + "\n";
@@ -427,9 +500,11 @@ std::string HelpMessage(HelpMessageMode mode)                                   
     strUsage += "  -rpcuser=<user>        " + _("Username for JSON-RPC connections") + "\n";
     strUsage += "  -rpcpassword=<pw>      " + _("Password for JSON-RPC connections") + "\n";
     strUsage += "  -rpcport=<port>        " + strprintf(_("Listen for JSON-RPC connections on <port> (default: %u or testnet: %u)"), 8332, 18332) + "\n";
-    strUsage += "  -rpcallowip=<ip>       " + _("Allow JSON-RPC connections from specified source. Valid for <ip> are a single IP (e.g. 1.2.3.4), a network/netmask (e.g. 1.2.3.4/255.255.255.0) or a network/CIDR (e.g. 1.2.3.4/24). This option can be specified multiple times") + "\n";
+    strUsage += "  -rpcallowip=<ip>       " + _("Allow JSON-RPC connections from specified source. Valid for <ip> are a single IP (e.g. 1.2.3.4), a network/netmask (e.g. 1.2.3.4/255.255.255.0) or a network/CIDR (e.g. 1.2.3.4/24).") + "\n";
+    strUsage += "                         " + _("This option can be specified multiple times") + "\n";
+    strUsage += "  -rpcallowmethod=<methods> " + _("If specified, allow only comma delimited list of JSON-RPC <methods>. This option can be specified multiple times.") + "\n";
     strUsage += "  -rpcthreads=<n>        " + strprintf(_("Set the number of threads to service RPC calls (default: %d)"), 4) + "\n";
-    strUsage += "  -rpckeepalive          " + strprintf(_("RPC support for HTTP persistent connections (default: %d)"), 1) + "\n";
+    strUsage += "  -rpckeepalive          " + strprintf(_("RPC support for HTTP persistent connections (default: %d)"), 0) + "\n";
 
     strUsage += "\n" + _("RPC SSL options") + "\n";
     strUsage += "  -rpcssl                                  " + _("Use OpenSSL (https) for JSON-RPC connections") + "\n";
@@ -438,13 +513,34 @@ std::string HelpMessage(HelpMessageMode mode)                                   
     strUsage += "  -rpcsslciphers=<ciphers>                 " + strprintf(_("Acceptable ciphers (default: %s)"), "TLSv1.2+HIGH:TLSv1+HIGH:!SSLv2:!aNULL:!eNULL:!3DES:@STRENGTH") + "\n";
 
     strUsage += "\n" + _("MultiChain runtime parameters") + "\n";    
+    strUsage += "  -offline                                 " + _("Start multichaind in offline mode, no connections to other nodes.") + "\n";
+    strUsage += "  -initprivkey=<privkey>                   " + _("Manually set the wallet default address and private key when running multichaind for the first time.") + "\n";
     strUsage += "  -handshakelocal=<address>                " + _("Manually override the wallet address which is used for handshaking with other peers in a MultiChain blockchain.") + "\n";
-    strUsage += "  -hideknownopdrops=<n>                    " + strprintf(_("Remove recognized MultiChain OP_DROP metadata from the responses to JSON_RPC calls (default: %u)"), 0) + "\n";
-    strUsage += "  -miningrequirespeers=<n>                 " + _("If set overrides mining-reqires-peers blockhain setting, values 0/1.") + "\n";
-    strUsage += "  -shrinkdebugfilesize=<n>                 " + _("If set debug.log is shrinked to size in range <n> - 5<n>.") + "\n";
-    
+    strUsage += "  -lockadminminerounds=<n>                 " + _("If set overrides lock-admin-mine-rounds blockchain setting.") + "\n";
+    strUsage += "  -miningrequirespeers=<n>                 " + _("If set overrides mining-requires-peers blockchain setting, values 0/1.") + "\n";
+    strUsage += "  -mineemptyrounds=<n>                     " + _("If set overrides mine-empty-rounds blockchain setting, values 0.0-1000.0 or -1.") + "\n";
+    strUsage += "  -miningturnover=<n>                      " + _("If set overrides mining-turnover blockchain setting, values 0-1.") + "\n";
+    strUsage += "  -shrinkdebugfilesize=<n>                 " + _("If shrinkdebugfile is 1, this controls the size of the debug file. Whenever the debug.log file reaches over 5 times this number of bytes, it is reduced back down to this size.") + "\n";
+    strUsage += "  -shortoutput                             " + _("Only show the node address (if connecting was successful) or an address in the wallet (if connect permissions must be granted by another node)") + "\n";
+    strUsage += "  -bantx=<txids>                           " + _("Comma delimited list of banned transactions.") + "\n";
+    strUsage += "  -lockblock=<hash>                        " + _("Blocks on branches without this block will be rejected") + "\n";
+    strUsage += "  -chunkquerytimeout=<n>                   " + _("Timeout, after which undelivered chunk is moved to the end of the chunk queue, default 25s") + "\n";
+    strUsage += "  -chunkrequesttimeout=<n>                 " + _("Timeout, after which chunk request is dropped and another source is tried, default 10s") + "\n";
+    strUsage += "  -flushsourcechunks=<n>                   " + _("Flush offchain items created by this node to disk immediately when created, default 1") + "\n";
+    strUsage += "  -acceptfiltertimeout=<n>                 " + strprintf(_("Timeout, after which filter execution will be aborted, when accepting new txs, in milliseconds, default %u"),DEFAULT_ACCEPT_FILTER_TIMEOUT) + "\n";
+    strUsage += "  -sendfiltertimeout=<n>                   " + strprintf(_("Timeout, after which filter execution will be aborted, when tx is sent from this node, in milliseconds, default %u"),DEFAULT_SEND_FILTER_TIMEOUT) + "\n";
+    strUsage += "  -lockinlinemetadata=<n>                  " + _("Outputs with inline metadata can be sent only using create/appendrawtransaction, default 1") + "\n";
+
+    strUsage += "\n" + _("MultiChain API response parameters") + "\n";        
+    strUsage += "  -hideknownopdrops=<n>  " + strprintf(_("Remove recognized MultiChain OP_DROP metadata from the responses to JSON-RPC calls (default: %u)"), 0) + "\n";
+    strUsage += "  -maxshowndata=<n>      " + strprintf(_("The maximum number of bytes to show in the data field of API responses. (default: %u)"), MAX_OP_RETURN_SHOWN) + "\n";
+    strUsage += "                         " + _("Pieces of data larger than this will be returned as an object with txid, vout and size fields, for use with the gettxoutdata command.") + "\n";
+    strUsage += "  -maxqueryscanitems=<n> " + strprintf(_("The maximum number of txs to be decoded during JSON-RPC querying commands. (default: %u)"), MAX_STREAM_QUERY_ITEMS) + "\n";
+    strUsage += "  -v1apicompatible=<n>   " + strprintf(_("JSON-RPC calls responses compatible with MultiChain 1.0 (default: %u)"), 0) + "\n";
+//    strUsage += "  -apidecimaldigits=<n>  " + _("maximal number of decimal digits in API output (default: auto)") + "\n";
+           
     strUsage += "\n" + _("Wallet optimization options:") + "\n";
-    strUsage += "  -autocombineminconf    " + _("Minimum confirmations for automatically combined outputs, default 1") + "\n";
+    strUsage += "  -autocombineminconf    " + _("Only automatically combine outputs with at least this number of confirmations, default 1") + "\n";
     strUsage += "  -autocombinemininputs  " + _("Minimum inputs in automatically created combine transaction, default 50") + "\n";
     strUsage += "  -autocombinemaxinputs  " + _("Maximum inputs in automatically created combine transaction, default 100") + "\n";
     strUsage += "  -autocombinedelay      " + _("Minimium delay between two auto-combine transactions, in seconds, default 1") + "\n";
@@ -581,7 +677,7 @@ bool InitSanityCheck(void)
  */
 bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
 {
-/* MCHN START */    
+/* MCHN START */   
     char bufOutput[4096];
     size_t bytes_written;
 /* MCHN END */        
@@ -688,8 +784,11 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
 
     if (!GetBoolArg("-listen", true)) {
         // do not map ports or try to retrieve public IP when not listening (pointless)
+/*        
         if (SoftSetBoolArg("-upnp", false))
             LogPrintf("AppInit2 : parameter interaction: -listen=0 -> setting -upnp=0\n");
+ */ 
+        mapArgs["-upnp"] = std::string("0");
         if (SoftSetBoolArg("-discover", false))
             LogPrintf("AppInit2 : parameter interaction: -listen=0 -> setting -discover=0\n");
     }
@@ -739,7 +838,14 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
     // Check for -tor - as this is a privacy risk to continue, exit here
     if (GetBoolArg("-tor", false))
         return InitError(_("Error: Unsupported argument -tor found, use -onion."));
-
+    int MaxOutConnections=GetArg("-maxoutconnections",8);
+    if ( (MaxOutConnections < 1) || (MaxOutConnections > 32) )
+    {
+        return InitError(_("Error: -maxoutconnections out of range."));        
+    }
+    
+    
+    
     if (GetBoolArg("-benchmark", false))
         InitWarning(_("Warning: Unsupported argument -benchmark ignored, use -debug=bench."));
 
@@ -792,42 +898,6 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
     }
 
 #ifdef ENABLE_WALLET
-    if (mapArgs.count("-mintxfee"))
-    {
-        CAmount n = 0;
-        if (ParseMoney(mapArgs["-mintxfee"], n) && n > 0)
-            CWallet::minTxFee = CFeeRate(n);
-        else
-            return InitError(strprintf(_("Invalid amount for -mintxfee=<amount>: '%s'"), mapArgs["-mintxfee"]));
-    }
-    if (mapArgs.count("-paytxfee"))
-    {
-        CAmount nFeePerK = 0;
-        if (!ParseMoney(mapArgs["-paytxfee"], nFeePerK))
-            return InitError(strprintf(_("Invalid amount for -paytxfee=<amount>: '%s'"), mapArgs["-paytxfee"]));
-        if (nFeePerK > nHighTransactionFeeWarning)
-            InitWarning(_("Warning: -paytxfee is set very high! This is the transaction fee you will pay if you send a transaction."));
-        payTxFee = CFeeRate(nFeePerK, 1000);
-        if (payTxFee < ::minRelayTxFee)
-        {
-            return InitError(strprintf(_("Invalid amount for -paytxfee=<amount>: '%s' (must be at least %s)"),
-                                       mapArgs["-paytxfee"], ::minRelayTxFee.ToString()));
-        }
-    }
-    if (mapArgs.count("-maxtxfee"))
-    {
-        CAmount nMaxFee = 0;
-        if (!ParseMoney(mapArgs["-maxtxfee"], nMaxFee))
-            return InitError(strprintf(_("Invalid amount for -maxtxfee=<amount>: '%s'"), mapArgs["-maptxfee"]));
-        if (nMaxFee > nHighTransactionMaxFeeWarning)
-            InitWarning(_("Warning: -maxtxfee is set very high! Fees this large could be paid on a single transaction."));
-        maxTxFee = nMaxFee;
-        if (CFeeRate(maxTxFee, 1000) < ::minRelayTxFee)
-        {
-            return InitError(strprintf(_("Invalid amount for -maxtxfee=<amount>: '%s' (must be at least the minrelay fee of %s to prevent stuck transactions)"),
-                                       mapArgs["-maxtxfee"], ::minRelayTxFee.ToString()));
-        }
-    }
     nTxConfirmTarget = GetArg("-txconfirmtarget", 1);
     bSpendZeroConfChange = GetArg("-spendzeroconfchange", true);
     fSendFreeTransactions = GetArg("-sendfreetransactions", false);
@@ -870,9 +940,9 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
 #endif
 /* MCHN END */
     
-#ifndef WIN32
-    CreatePidFile(GetPidFile(), getpid());
-#endif
+//#ifndef WIN32
+    CreatePidFile(GetPidFile(), __US_GetPID());
+//#endif
     if (GetBoolArg("-shrinkdebugfile", !fDebug))
         ShrinkDebugFile();
     LogPrintf("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
@@ -880,13 +950,13 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
 /* MCHN START */    
     if(mc_gState->m_NetworkParams->IsProtocolMultichain())
     {
-        LogPrintf("MultiChain version %s (%s)\n", mc_gState->GetFullVersion(), CLIENT_DATE);
+        LogPrintf("MultiChain version build %s protocol %s (%s)\n", mc_BuildDescription(mc_gState->GetNumericVersion()), mc_gState->GetProtocolVersion(), CLIENT_DATE);
     }
 
 /* MCHN END */    
     LogPrintf("Using OpenSSL version %s\n", SSLeay_version(SSLEAY_VERSION));
 #ifdef ENABLE_WALLET
-    LogPrintf("Using BerkeleyDB version %s\n", DbEnv::version(0, 0, 0));
+    WalletDBLogVersionString();
 #endif
     if (!fLogTimestamps)
         LogPrintf("Startup time: %s\n", DateTimeStrFormat("%Y-%m-%d %H:%M:%S", GetTime()));
@@ -897,9 +967,13 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
     std::ostringstream strErrors;
 
     LogPrintf("Using %u threads for script verification\n", nScriptCheckThreads);
-    if (nScriptCheckThreads) {
-        for (int i=0; i<nScriptCheckThreads-1; i++)
-            threadGroup.create_thread(&ThreadScriptCheck);
+    
+    if(!GetBoolArg("-offline",false))
+    {    
+        if (nScriptCheckThreads) {
+            for (int i=0; i<nScriptCheckThreads-1; i++)
+                threadGroup.create_thread(&ThreadScriptCheck);
+        }
     }
 
     /* Start the RPC server already.  It will be started in "warmup" mode
@@ -918,14 +992,91 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
     }
 */
     int64_t nStart;
-
     // ********************************************************* Step 5: verify wallet database integrity
 #ifdef ENABLE_WALLET
+    int currentwalletdatversion=0;
+    int64_t wallet_mode=GetArg("-walletdbversion",MC_TDB_WALLET_VERSION);
+    mc_gState->m_WalletMode=MC_WMD_NONE;
+    std::vector<CDBConstEnv::KeyValPair> salvagedData;
+    bool wallet_upgrade=false;
+    
     if (!fDisableWallet) {
         LogPrintf("Using wallet %s\n", strWalletFile);
         uiInterface.InitMessage(_("Verifying wallet..."));
 
-        if (!bitdb.Open(GetDataDir()))
+        
+        boost::filesystem::path pathWalletDat=GetDataDir() / strWalletFile;
+        if (filesystem::exists(pathWalletDat))
+        {
+            currentwalletdatversion=GetWalletDatVersion(pathWalletDat.string());
+            boost::filesystem::path pathWallet=GetDataDir() / "wallet";
+
+            LogPrintf("Wallet file exists. WalletDBVersion: %d.\n", currentwalletdatversion);
+            if(currentwalletdatversion != 1)
+            {
+                if(pEF->ENT_MinWalletDatVersion() > currentwalletdatversion)
+                {
+                    return InitError(strprintf("Wallet version %d is not supported in this edition of MultiChain.\n"
+                            "To upgrade to version %d, run MultiChain Offline Daemon: \n"
+                            "multichaind-cold %s -datadir=%s -walletdbversion=3\n"
+                            "and restart multichaind or use Community Edition.\n",
+                            currentwalletdatversion,pEF->ENT_MinWalletDatVersion(), mc_gState->m_NetworkParams->Name(),mc_gState->m_Params->DataDir(0,0)));                                                            
+                }
+            }
+            if( (currentwalletdatversion == 3) && (GetArg("-walletdbversion",MC_TDB_WALLET_VERSION) != 3) )
+            {
+                return InitError(_("Wallet downgrade is not allowed"));                                                        
+            }
+            if( (currentwalletdatversion == 2) && (GetArg("-walletdbversion",0) == 3) )
+            {
+                if(!boost::filesystem::exists(pathWallet))
+                {
+                    currentwalletdatversion=1;
+                }
+                else
+                {
+                    CDBWrapEnv env2;
+                    if (!env2.Open(GetDataDir()))
+                    {
+                        return InitError(_("Error initializing wallet database environment for upgrade"));                                        
+                    }                
+                    bool allOK = env2.Salvage(strWalletFile, false, salvagedData);
+                    if(!allOK)
+                    {
+                        return InitError(_("wallet.dat corrupt, cannot upgrade, you should repair it first.\n Run multichaind normally or with -salvagewallet flag"));                    
+                    }
+
+                    currentwalletdatversion=3;
+                    wallet_upgrade=true;                
+                }
+            }
+        }
+        else
+        {
+            currentwalletdatversion=wallet_mode;
+            if(pEF->ENT_MinWalletDatVersion() > currentwalletdatversion)
+            {
+                return InitError(strprintf("Wallet version %d is not supported in this edition of MultiChain.\n",currentwalletdatversion));                                                            
+            }
+            
+            LogPrintf("Wallet file doesn't exist. New file will be created with version %d.\n", currentwalletdatversion);
+        }      
+        switch(currentwalletdatversion)
+        {
+            case 3:
+                mc_gState->m_WalletMode |= MC_WMD_FLAT_DAT_FILE;
+                break;
+            case 2:
+                break;
+            case 1:
+                return InitError(strprintf("Wallet version 1 is not supported in this version of MultiChain. "
+                        "To upgrade to version 2, run MultiChain 1.0: \n"
+                        "multichaind %s -walletdbversion=2 -rescan\n",mc_gState->m_NetworkParams->Name()));                                        
+            default:
+                return InitError(_("Invalid wallet version, possible values 2, 3.\n"));                                                                    
+        }
+        
+        if (!bitdbwrap.Open(GetDataDir()))
         {
             // try moving the database env out of the way
             boost::filesystem::path pathDatabase = GetDataDir() / "database";
@@ -938,24 +1089,52 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
             }
 
             // try again
-            if (!bitdb.Open(GetDataDir())) {
+            if (!bitdbwrap.Open(GetDataDir())) {
                 // if it still fails, it probably means we can't even create the database env
                 string msg = strprintf(_("Error initializing wallet database environment %s!"), strDataDir);
                 return InitError(msg);
             }
+        }        
+        
+        if(wallet_upgrade)
+        {
+            LogPrintf("Wallet file will be upgraded to version %d.\n", currentwalletdatversion);
+            if(!bitdbwrap.Recover(strWalletFile,salvagedData))
+            {
+                return InitError(_("Couldn't upgrade wallet.dat"));                                    
+            }
+            
         }
+        
+        if (filesystem::exists(pathWalletDat))
+        {
+            currentwalletdatversion=GetWalletDatVersion(pathWalletDat.string());
+        }
+        else
+        {
+            currentwalletdatversion=wallet_mode;
+        }      
+
 
         if (GetBoolArg("-salvagewallet", false))
         {
             // Recover readable keypairs:
-            if (!CWalletDB::Recover(bitdb, strWalletFile, true))
+//            if (!CWalletDB::Recover(bitdbwrap, strWalletFile, true))
+            if(!WalletDBRecover(bitdbwrap,strWalletFile,true))
                 return false;
+            sprintf(bufOutput,"\nTo work properly with salvaged addresses, you have to call importaddress API and restart MultiChain with -rescan\n\n");
+            bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));                
         }
 
         if (filesystem::exists(GetDataDir() / strWalletFile))
         {
-            CDBEnv::VerifyResult r = bitdb.Verify(strWalletFile, CWalletDB::Recover);
-            if (r == CDBEnv::RECOVER_OK)
+//            CDBConstEnv::VerifyResult r = bitdbwrap.Verify(strWalletFile, CWalletDB::Recover);
+            CDBConstEnv::VerifyResult r = bitdbwrap.Verify(strWalletFile);
+            if(r != CDBConstEnv::VERIFY_OK)
+            {
+                r=WalletDBRecover(bitdbwrap,strWalletFile) ? CDBConstEnv::RECOVER_OK : CDBConstEnv::RECOVER_FAIL;
+            }
+            if (r == CDBConstEnv::RECOVER_OK)
             {
                 string msg = strprintf(_("Warning: wallet.dat corrupt, data salvaged!"
                                          " Original wallet.dat saved as wallet.{timestamp}.bak in %s; if"
@@ -963,16 +1142,43 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                                          " restore from a backup."), strDataDir);
                 InitWarning(msg);
             }
-            if (r == CDBEnv::RECOVER_FAIL)
+            if (r == CDBConstEnv::RECOVER_FAIL)
                 return InitError(_("wallet.dat corrupt, salvage failed"));
         }
+        else
+        {
+            bitdbwrap.SetSeekDBName(strWalletFile);
+        }
+                
     } // (!fDisableWallet)
 
 /* MCHN START*/    
     uiInterface.InitMessage(_("Initializing multichain..."));
     RegisterNodeSignals(GetNodeSignals());
 
+    if(GetBoolArg("-v1apicompatible",false))
+    {
+        mc_gState->m_Compatibility |= MC_VCM_1_0;
+    }
+
+    if(GetBoolArg("-offline",false))
+    {
+        if(mc_gState->m_NetworkParams->m_Status != MC_PRM_STATUS_VALID)
+        {
+            char fileName[MC_DCT_DB_MAX_PATH];
+            mc_GetFullFileName(mc_gState->m_Params->NetworkName(),"params", ".dat",MC_FOM_RELATIVE_TO_DATADIR,fileName);
+            string seed_error=strprintf("Couldn't retrieve blockchain parameters from the seed node in offline mode.\n"
+                        "The file %s must be copied manually from an existing node.\n",                
+                    fileName);
+            return InitError(seed_error);                        
+        }        
+    }    
+
+    
     bool fFirstRunForBuild;
+    string init_privkey=GetArg("-initprivkey","");
+
+    mc_gState->m_NetworkParams->m_RelevantProtocolVersion=mc_gState->RelevantParamProtocolVersion(); // Caching relevant protocol version
     
     pwalletMain=NULL;
     if(mc_gState->m_NetworkParams->m_Status != MC_PRM_STATUS_VALID)
@@ -982,20 +1188,43 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
 
         if (nLoadWalletRetForBuild != DB_LOAD_OK)                                   // MCHN-TODO wallet recovery
         {
-            return InitError(_("wallet.dat corrupted. Please remove it and restart."));            
+            if (GetBoolArg("-salvagewallet", false))
+            {
+                return InitError(_("wallet.dat corrupted. Please remove it and restart."));            
+            }
+            return InitError(_("wallet.dat is partially corrupted. Please try running MultiChain with -salvagewallet."));                            
         }
 
         if(!pwalletMain->vchDefaultKey.IsValid())
         {
-            LogPrintf("mchn: Default key is not found - creating new... \n");
-            // Create new keyUser and set as default key
-            RandAddSeedPerfmon();
-
-            pwalletMain->SetMinVersion(FEATURE_LATEST); // permanently upgrade the wallet immediately
-            CPubKey newDefaultKey;
-            if (pwalletMain->GetKeyFromPool(newDefaultKey)) {
-                pwalletMain->SetDefaultKey(newDefaultKey);
+            if(init_privkey.size())
+            {
+                LogPrintf("mchn: Default key is specified using -initprivkey - not created\n");                
             }
+            else
+            {
+                LogPrintf("mchn: Default key is not found - creating new... \n");
+                // Create new keyUser and set as default key
+    //            RandAddSeedPerfmon();
+                pwalletMain->SetMinVersion(FEATURE_LATEST); // permanently upgrade the wallet immediately
+                CPubKey newDefaultKey;
+                if (pwalletMain->GetKeyFromPool(newDefaultKey)) {
+                    pwalletMain->SetDefaultKey(newDefaultKey);
+                }
+            }
+        }
+        else
+        {
+            if(init_privkey.size())
+            {
+                LogPrintf("mchn: Wallet already has default key, -initprivkey is ignored\n");                
+                if(!GetBoolArg("-shortoutput", false))
+                {    
+                    sprintf(bufOutput,"Wallet already has default key, -initprivkey is ignored\n\n");
+                    bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+                }
+                init_privkey="";
+            }            
         }
     }
     
@@ -1006,154 +1235,216 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
     bool zap_wallet_txs=false;
     bool new_wallet_txs=false;
     seed_node=mc_gState->GetSeedNode();
+    mc_Buffer *rescan_subscriptions=NULL;
     
-    if((mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_EMPTY) 
-       || (mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_MINIMAL))
+    int seed_attempt=1;
+    if(init_privkey.size())
     {
-        if(mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_MINIMAL)
+        if(mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_EMPTY) 
         {
-            InitializeMultiChainParams();                    
+            seed_attempt=2;            
         }
+    }
+    
+    while(seed_attempt)
+    {        
         
-        if(seed_node)
+        if((mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_EMPTY) 
+           || (mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_MINIMAL))
         {
-            if(!GetBoolArg("-shortoutput", false))
-            {    
-                sprintf(bufOutput,"Retrieving blockchain parameters from the seed node %s ...\n",seed_node);
-                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+            if(mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_MINIMAL)
+            {
+                InitializeMultiChainParams();                    
+                if(init_privkey.size())
+                {
+                    if(seed_attempt == 1)
+                    {
+                        if(mc_gState->m_NetworkParams->GetParam("privatekeyversion",NULL) == NULL)
+                        {
+                            return InitError(_("The initprivkey runtime parameter can only be used when connecting to MultiChain 1.0 beta 2 or later"));                                                        
+                        }
+                        string init_privkey_error=pwalletMain->SetDefaultKeyIfInvalid(init_privkey);
+                        if(init_privkey_error.size())
+                        {
+                            return InitError(strprintf("Cannot set initial private key: %s",init_privkey_error));                            
+                        }
+                        init_privkey="";
+                    }
+                }
             }
-        }
-        
-        LogPrintf("mchn: Parameter set is not complete - starting paramset discovery thread...\n");
-        boost::thread_group seedThreadGroup;
-        
-        mc_gState->m_NetworkState=MC_NTS_WAITING_FOR_SEED;
-        
-        string seed_ip=seed_node;
-        string seed_port="";
-        stringstream ss(seed_ip); 
-        string tok;
-        int size;
-        
-        if(getline(ss, tok, ':'))
-        {
-            seed_ip=tok;
+
+            if(seed_node)
+            {
+                if(seed_attempt == 1)
+                {
+                    if(!GetBoolArg("-shortoutput", false))
+                    {    
+                        sprintf(bufOutput,"Retrieving blockchain parameters from the seed node %s ...\n",seed_node);
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+                    }
+                }
+            }
+
+            LogPrintf("mchn: Parameter set is not complete - starting paramset discovery thread...\n");
+            boost::thread_group seedThreadGroup;
+
+            mc_gState->m_NetworkState=MC_NTS_WAITING_FOR_SEED;
+
+            string seed_ip=seed_node;
+            int seed_port=0;
+            stringstream ss(seed_ip); 
+            string tok;
+            int size;
+
+            seed_ip=mc_ParseIPPort(seed_ip,&seed_port);
+/*            
+            if(seed_port<=0)
+            {
+                seed_port=GetListenPort();
+            }
+*/            
+/*            
             if(getline(ss, tok, ':'))
             {
-                seed_port=tok;
-            }
-        }            
-        
-        if(mc_QuerySeed(seedThreadGroup,seed_node))
-        {
-            if((mc_gState->m_NetworkState == MC_NTS_SEED_READY) || (mc_gState->m_NetworkState == MC_NTS_SEED_NO_PARAMS) )
-            {
-                seed_error="Couldn't disconnect from the seed node, please restart multichaind";
-//                return InitError(_("Couldn't disconnect from the seed node, please restart multichaind"));            
-            }
+                seed_ip=tok;
+                if(getline(ss, tok, ':'))
+                {
+                    seed_port=tok;
+                }
+            }            
+*/
             
+            if(mc_QuerySeed(seedThreadGroup,seed_node))
+            {
+                if((mc_gState->m_NetworkState == MC_NTS_SEED_READY) || (mc_gState->m_NetworkState == MC_NTS_SEED_NO_PARAMS) )
+                {
+                    seed_error="Couldn't disconnect from the seed node, please restart multichaind";
+                }
+                else
+                {
+//                    if(seed_port.size() == 0)
+                    if(seed_port == 0)
+                    {
+                        seed_error=strprintf("Couldn't connect to the seed node %s - please specify port number explicitly.",seed_node);                
+                    }
+                    else
+                    {
+                        seed_error=strprintf("Couldn't connect to the seed node %s on port %d - please check multichaind is running at that address and that your firewall settings allow incoming connections.",                
+                            seed_ip.c_str(),seed_port);
+                    }
+                }
+            }
+
+            if(mc_gState->m_NetworkParams->GetParam("protocolversion",&size) != NULL)
+            {
+                int protocol_version=(int)mc_gState->m_NetworkParams->GetInt64Param("protocolversion");
             
-//            seed_error="Couldn't connect to the seed node";
-            if(seed_port.size() == 0)
-            {
-                seed_error=strprintf("Couldn't connect to the seed node %s - please specify port number explicitly.",seed_node);                
+                if(mc_gState->IsSupported(protocol_version) == 0) 
+                {
+                    if(mc_gState->IsDeprecated(protocol_version))
+                    {
+                        seed_error=strprintf("The protocol version (%d) for blockchain %s has been deprecated and was last supported in MultiChain %s\n",                
+                                protocol_version, mc_gState->m_Params->NetworkName(),
+                                mc_BuildDescription(-mc_gState->VersionInfo(protocol_version)));                    
+                        return InitError(seed_error);                                
+                    }
+                    else
+                    {
+                        seed_error=strprintf("Couldn't connect to the seed node %s on port %d.\n"
+                                    "Blockchain was created by multichaind with newer protocol version (%d)\n"                
+                                    "Please upgrade to the latest version of MultiChain or connect only to blockchains using protocol version %d or earlier.\n",                
+                                seed_ip.c_str(),seed_port,protocol_version, mc_gState->GetProtocolVersion());                        
+                    }
+                }
             }
-            else
-            {
-                seed_error=strprintf("Couldn't connect to the seed node %s on port %s - please check multichaind is running at that address and that your firewall settings allow incoming connections.",                
-                    seed_ip.c_str(),seed_port.c_str());
-            }
-//            return InitError(_("Couldn't connect to the seed node"));            
-        }
-        
-        if( (mc_gState->m_NetworkParams->GetParam("protocolversion",&size) != NULL) &&
-            (mc_gState->GetProtocolVersion() < (int)mc_gState->m_NetworkParams->GetInt64Param("protocolversion")) )
-        {
-            seed_error=strprintf("Couldn't connect to the seed node %s on port %s.\n"
-                        "Blockchain was created by multichaind with newer protocol version (%d)\n"                
-                        "Please upgrade to the latest version of MultiChain or connect only to blockchains using protocol version %d or earlier.\n",                
-                    seed_ip.c_str(),seed_port.c_str(),(int)mc_gState->m_NetworkParams->GetInt64Param("protocolversion"), mc_gState->GetProtocolVersion());
-        }
-        else
-        {                                
+                    
             if(mc_gState->m_NetworkState == MC_NTS_SEED_NO_PARAMS)
             {
                 char fileName[MC_DCT_DB_MAX_PATH];
                 mc_GetFullFileName(mc_gState->m_Params->NetworkName(),"params", ".dat",MC_FOM_RELATIVE_TO_DATADIR,fileName);
-                seed_error=strprintf("Couldn't retrieve blockchain parameters from the seed node %s on port %s.\n"
+                seed_error=strprintf("Couldn't retrieve blockchain parameters from the seed node %s on port %d.\n"
                             "For bitcoin protocol blockchains, the file %s must be copied manually from an existing node.",                
-                        seed_ip.c_str(),seed_port.c_str(),fileName);
+                        seed_ip.c_str(),seed_port,fileName);
 
             }
-        }
-        LogPrintf("mchn: Exited from paramset discovery thread\n");        
-        
-        if(mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_VALID)
-        {
-            SelectMultiChainParams(mc_gState->m_Params->NetworkName());
-            delete mc_gState->m_Permissions;
-            mc_gState->m_Permissions= new mc_Permissions;
-/*            
-            mc_gState->m_Assets->RemoveFiles();
-            delete mc_gState->m_Assets;
-            mc_gState->m_Assets= new mc_AssetDB();
- */ 
-            if(mc_gState->m_Permissions->Initialize(mc_gState->m_Params->NetworkName(),0))                                
+            
+            LogPrintf("mchn: Exited from paramset discovery thread\n");        
+
+            if(mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_VALID)
             {
-                seed_error="Couldn't initialize permission database with retrieved parameters\n";
-            }            
-        }
-
-    }
-    else
-    {
-        if(mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_GENERATED)
-        {
-            const unsigned char *pubKey=pwalletMain->vchDefaultKey.begin();
-            int pubKeySize=pwalletMain->vchDefaultKey.size();
-
-            LogPrintf("mchn: Parameter set is new, THIS IS GENESIS NODE - looking for genesis block...\n");
-            if(!GetBoolArg("-shortoutput", false))
-            {    
-                sprintf(bufOutput,"Looking for genesis block...\n");
-                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));                
-            }
-            mc_gState->m_NetworkParams->SetGlobals();                           // Needed to update IsProtocolMultichain flag in case of bitcoin
-            if(mc_gState->m_NetworkParams->Build(pubKey,pubKeySize))
-            {
-/*                
-                delete pwalletMain;
-                pwalletMain=NULL;
- */ 
-                return InitError(_("Cannot build new blockchain"));
-            }
-            LogPrintf("mchn: Genesis block found\n");
-            if(!GetBoolArg("-shortoutput", false))
-            {    
-                sprintf(bufOutput,"Genesis block found\n\n");
-                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));                
+                SelectMultiChainParams(mc_gState->m_Params->NetworkName());
+                delete mc_gState->m_Permissions;
+                mc_gState->m_Permissions= new mc_Permissions;
+                if(mc_gState->m_Permissions->Initialize(mc_gState->m_Params->NetworkName(),0))                                
+                {
+                    seed_error="Couldn't initialize permission database with retrieved parameters\n";
+                }            
             }
 
-            mc_gState->m_NetworkParams->Validate();        
-
-            if(mc_gState->m_NetworkParams->m_Status != MC_PRM_STATUS_VALID)
-            {
-/*                
-                delete pwalletMain;
-                pwalletMain=NULL;
- */ 
-                return InitError(_("Invalid parameter set"));
-            }                        
         }
         else
         {
-            if(seed_node)
+            if(mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_GENERATED)
             {
+                if(init_privkey.size())
+                {
+                    if(mc_gState->m_NetworkParams->GetParam("privatekeyversion",NULL) == NULL)
+                    {
+                        return InitError(_("The initprivkey runtime parameter can only be used when connecting to MultiChain 1.0 beta 2 or later"));                                                        
+                    }
+                    string init_privkey_error=pwalletMain->SetDefaultKeyIfInvalid(init_privkey);
+                    if(init_privkey_error.size())
+                    {
+                        return InitError(strprintf("Cannot set initial private key: %s",init_privkey_error));                            
+                    }
+                    init_privkey="";
+                }
+                const unsigned char *pubKey=pwalletMain->vchDefaultKey.begin();
+                int pubKeySize=pwalletMain->vchDefaultKey.size();
+
+                LogPrintf("mchn: Parameter set is new, THIS IS GENESIS NODE - looking for genesis block...\n");
                 if(!GetBoolArg("-shortoutput", false))
                 {    
-                    sprintf(bufOutput,"Chain %s already exists, adding %s to list of peers\n\n",mc_gState->m_NetworkParams->Name(),seed_node);
-                    bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-                }                    
+                    sprintf(bufOutput,"Looking for genesis block...\n");
+                    bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));                
+                }
+                mc_gState->m_NetworkParams->SetGlobals();                           // Needed to update IsProtocolMultichain flag in case of bitcoin
+                if(mc_gState->m_NetworkParams->Build(pubKey,pubKeySize))
+                {
+                    return InitError(_("Cannot build new blockchain"));
+                }
+                LogPrintf("mchn: Genesis block found\n");
+                if(!GetBoolArg("-shortoutput", false))
+                {    
+                    sprintf(bufOutput,"Genesis block found\n\n");
+                    bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));                
+                }
+
+                mc_gState->m_NetworkParams->Validate();        
+
+                if(mc_gState->m_NetworkParams->m_Status != MC_PRM_STATUS_VALID)
+                {
+                    return InitError(_("Invalid parameter set"));
+                }                        
+            }
+            else
+            {
+                if(seed_node)
+                {
+                    if(!GetBoolArg("-shortoutput", false))
+                    {    
+                        sprintf(bufOutput,"Chain %s already exists, adding %s to list of peers\n\n",mc_gState->m_NetworkParams->Name(),seed_node);
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+                    }                    
+                }
+            }
+        }
+        seed_attempt--;
+        if(seed_attempt)
+        {
+            if(mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_EMPTY)            
+            {
+                seed_attempt--;                
             }
         }
     }
@@ -1166,85 +1457,84 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
 
         if(GetBoolArg("-reindex", false))
         {
-            if(mc_gState->m_Features->FollowOnIssues())
-            {
-                mc_RemoveDir(mc_gState->m_Params->NetworkName(),"entities.db");
-                mc_RemoveFile(mc_gState->m_Params->NetworkName(),"entities",".dat",MC_FOM_RELATIVE_TO_DATADIR);
-            }
-            else
-            {
-                mc_RemoveDir(mc_gState->m_Params->NetworkName(),"assets.db");
-                mc_RemoveFile(mc_gState->m_Params->NetworkName(),"assets",".dat",MC_FOM_RELATIVE_TO_DATADIR);                
-            }
+            mc_RemoveDir(mc_gState->m_Params->NetworkName(),"entities.db");
+            mc_RemoveFile(mc_gState->m_Params->NetworkName(),"entities",".dat",MC_FOM_RELATIVE_TO_DATADIR);
         }
         
         mc_gState->m_Assets= new mc_AssetDB;
         if(mc_gState->m_Assets->Initialize(mc_gState->m_Params->NetworkName(),0))                                
         {
-            seed_error=strprintf("ERROR: Couldn't initialize asset database for blockchain %s. Exiting...\n",mc_gState->m_Params->NetworkName());
+            seed_error=strprintf("ERROR: Couldn't initialize asset database for blockchain %s. Please restart multichaind with reindex=1.\n",mc_gState->m_Params->NetworkName());
             return InitError(_(seed_error.c_str()));        
         }
         
-        int64_t wallet_mode=GetArg("-walletdbversion",0);
-        bool wallet_mode_valid=false;
+        string strBurnAddress=BurnAddress(Params().Base58Prefix(CChainParams::PUBKEY_ADDRESS)); // Caching burn address
+        LogPrint("mchn","mchn: Burn address: %s\n",strBurnAddress.c_str());                
+        
+        wallet_mode=GetArg("-walletdbversion",0);
         if(wallet_mode == 0)
         {
             mc_gState->m_WalletMode=MC_WMD_AUTO;
-            wallet_mode_valid=true;
         }
-        if(wallet_mode == MC_TDB_WALLET_VERSION)
+        if(wallet_mode == 3)
+        {
+            mc_gState->m_WalletMode=MC_WMD_TXS | MC_WMD_ADDRESS_TXS | MC_WMD_FLAT_DAT_FILE; 
+        }
+        if(wallet_mode == 2)
         {
             mc_gState->m_WalletMode=MC_WMD_TXS | MC_WMD_ADDRESS_TXS; 
-            wallet_mode_valid=true;
         }
+
         if(wallet_mode == 1)
         {
             mc_gState->m_WalletMode=MC_WMD_NONE;
-            wallet_mode_valid=true;
             zap_wallet_txs=false;
         }
         if(wallet_mode == -1)
         {
             mc_gState->m_WalletMode=MC_WMD_TXS | MC_WMD_ADDRESS_TXS | MC_WMD_MAP_TXS;            
-            wallet_mode_valid=true;
             zap_wallet_txs=false;
-        }
-
-        if(!wallet_mode_valid)
-        {
-            return InitError(_("Invalid wallet version, possible values 1 or 2.\n"));                                                    
         }
 
         vector <mc_TxEntity> vSubscribedEntities;
         if(GetBoolArg("-reindex", false) || GetBoolArg("-rescan", false))
         {
-            if(mc_gState->m_Features->Streams())
+            pwalletTxsMain=new mc_WalletTxs;
+            if(pwalletTxsMain->Initialize(mc_gState->m_NetworkParams->Name(),MC_WMD_TXS | MC_WMD_ADDRESS_TXS) == MC_ERR_NOERROR)
             {
-                pwalletTxsMain=new mc_WalletTxs;
-                if(pwalletTxsMain->Initialize(mc_gState->m_NetworkParams->Name(),MC_WMD_TXS | MC_WMD_ADDRESS_TXS) == MC_ERR_NOERROR)
+                mc_Buffer *entity_list;
+                entity_list=pwalletTxsMain->GetEntityList();
+                for(int e=0;e<entity_list->GetCount();e++)
                 {
-                    mc_Buffer *entity_list;
-                    entity_list=pwalletTxsMain->GetEntityList();
-                    for(int e=0;e<entity_list->GetCount();e++)
+                    mc_TxEntityStat *stat;
+                    stat=(mc_TxEntityStat *)entity_list->GetRow(e);
+                    switch(stat->m_Entity.m_EntityType & MC_TET_TYPE_MASK)
                     {
-                        mc_TxEntityStat *stat;
-                        stat=(mc_TxEntityStat *)entity_list->GetRow(e);
-                        switch(stat->m_Entity.m_EntityType & MC_TET_TYPE_MASK)
-                        {
-                            case MC_TET_PUBKEY_ADDRESS:
-                            case MC_TET_SCRIPT_ADDRESS:
-                            case MC_TET_STREAM:
-                            case MC_TET_STREAM_KEY:
-                            case MC_TET_STREAM_PUBLISHER:
-                                vSubscribedEntities.push_back(stat->m_Entity);
-                                break;
-                        }
+                        case MC_TET_PUBKEY_ADDRESS:
+                        case MC_TET_SCRIPT_ADDRESS:
+                        case MC_TET_STREAM:
+                        case MC_TET_STREAM_KEY:
+                        case MC_TET_STREAM_PUBLISHER:
+                        case MC_TET_ASSET:
+                            vSubscribedEntities.push_back(stat->m_Entity);
+                            break;
                     }
-                    __US_Sleep(1000);
                 }
-                pwalletTxsMain->Destroy();
-                delete pwalletTxsMain;            
+                __US_Sleep(1000);
+                rescan_subscriptions=new mc_Buffer;
+                mc_EnterpriseFeatures* pRescanEF = new mc_EnterpriseFeatures;
+                if(pRescanEF->Initialize(mc_gState->m_Params->NetworkName(),0))
+                {
+                    fprintf(stderr,"\nError: Cannot intitialize Enterprise features. Exiting...\n\n");
+                    return false;        
+                }
+                pRescanEF->STR_GetSubscriptions(rescan_subscriptions);
+                pRescanEF->Destroy();
+                delete pRescanEF;                
             }
+            pwalletTxsMain->Destroy();
+            delete pwalletTxsMain;            
+
             mc_RemoveDir(mc_gState->m_Params->NetworkName(),"wallet");            
             zap_wallet_txs=true;
         }
@@ -1254,12 +1544,12 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
         pwalletTxsMain=new mc_WalletTxs;
         mc_TxEntity entity;
         boost::filesystem::path pathWallet=GetDataDir() / "wallet";
-        
+                
         if(mc_gState->m_WalletMode == MC_WMD_NONE)
         {
             if(boost::filesystem::exists(pathWallet))
             {
-                return InitError(strprintf("Wallet was created in version 2. To switch to version 1, with worse performance and scalability, run: \nmultichaind %s -walletdbversion=1 -rescan\n",mc_gState->m_NetworkParams->Name()));                                        
+                return InitError(strprintf("Wallet was created in version 2 or higher. To switch to version 1, with worse performance and scalability, run: \nmultichaind %s -walletdbversion=1 -rescan\n",mc_gState->m_NetworkParams->Name()));                                        
             }
         }
         else
@@ -1274,16 +1564,21 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                     }
                     if(mc_gState->m_WalletMode != MC_WMD_NONE)
                     {
-                        return InitError(strprintf("Wallet was created in version 1. To switch to version 2, with better performance and scalability, run: \nmultichaind %s -walletdbversion=2 -rescan\n",mc_gState->m_NetworkParams->Name()));                                        
+                        return InitError(strprintf("Wallet was created in version 1. To switch to version %d, with better performance and scalability, run: \nmultichaind %s -walletdbversion=%d -rescan\n",
+                                MC_TDB_WALLET_VERSION,mc_gState->m_NetworkParams->Name(),MC_TDB_WALLET_VERSION));                                        
                     }                    
                 }
                 else
                 {
                     new_wallet_txs=true;
                     if(mc_gState->m_WalletMode == MC_WMD_AUTO)
-                    {
+                    {                        
                         mc_gState->m_WalletMode = MC_WMD_TXS | MC_WMD_ADDRESS_TXS;
                         wallet_mode=MC_TDB_WALLET_VERSION;
+                        if(wallet_mode > 2)
+                        {
+                            mc_gState->m_WalletMode |= MC_WMD_FLAT_DAT_FILE;
+                        }
                     }
                 }
             }
@@ -1294,6 +1589,10 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                 if(LogAcceptCategory("walletdump"))
                 {
                     mc_gState->m_WalletMode |= MC_WMD_DEBUG;
+                }
+                if(GetBoolArg("-nochunkflush",false))
+                {
+                    mc_gState->m_WalletMode |= MC_WMD_NO_CHUNK_FLUSH;
                 }
                 string autosubscribe=GetArg("-autosubscribe","none");
                 
@@ -1311,7 +1610,10 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                     mc_gState->m_WalletMode |= MC_WMD_AUTOSUBSCRIBE_ASSETS;
                 }                
 
-                pwalletTxsMain->Initialize(mc_gState->m_NetworkParams->Name(),mc_gState->m_WalletMode);
+                if(pwalletTxsMain->Initialize(mc_gState->m_NetworkParams->Name(),mc_gState->m_WalletMode))
+                {
+                    return InitError("Wallet tx database corrupted. Please restart multichaind with -rescan\n");                        
+                }
 
                 if(mc_gState->m_WalletMode & MC_WMD_AUTO)
                 {
@@ -1323,6 +1625,17 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                     wallet_mode=pwalletTxsMain->m_Database->m_DBStat.m_WalletVersion;
                 }
 
+                if( (pwalletTxsMain->m_Database->m_DBStat.m_WalletVersion == 2) && (wallet_mode == 3) )
+                {
+                    if(wallet_upgrade)
+                    {
+                        if(pwalletTxsMain->UpdateMode(MC_WMD_FLAT_DAT_FILE))
+                        {
+                            return InitError(_("Couldn't update wallet mode"));                                    
+                        }                        
+                    }
+                }
+                                
                 if((pwalletTxsMain->m_Database->m_DBStat.m_WalletVersion) != wallet_mode)
                 {
                     return InitError(strprintf("Wallet tx database was created with different wallet version (%d). Please restart multichaind with reindex=1 \n",pwalletTxsMain->m_Database->m_DBStat.m_WalletVersion));                        
@@ -1334,6 +1647,7 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                 }        
             }
         }
+        LogPrint("mcblockperf","mchn-block-perf: Wallet initialization completed (%s)\n",(mc_gState->m_WalletMode & MC_WMD_TXS) ? pwalletTxsMain->Summary() : "");
         LogPrintf("Wallet mode: %08X\n",mc_gState->m_WalletMode);
         if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
         {
@@ -1342,28 +1656,6 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                 return InitError(_("-zapwallettxes is not supported with scalable wallet.\n"));                                        
             }
         }
-//        int addr_status=mc_FindIPv4ServerAddress();
-
-/*        
-        if(!GetBoolArg("-shortoutput", false))
-        {    
-            printf("New users can connect to this node using\n");
-            printf("multichaind %s:%d\n\n",MultichainServerAddress().c_str(),GetListenPort());
-        }
-        else
-        {
-            printf("%s:%d\n",MultichainServerAddress().c_str(),GetListenPort());                
-        }
-        
-        int version=mc_gState->m_NetworkParams->GetInt64Param("protocolversion");
-        if(version != mc_gState->GetProtocolVersion())
-        {
-            if(!GetBoolArg("-shortoutput", false))
-            {    
-                printf("Protocol version %d\n\n",version);            
-            }
-        }
- */ 
 
         if(pwalletMain == NULL)                                                 // Opening wallet only after multichain parameters were initizalized
         {
@@ -1372,25 +1664,59 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
 
             if (nLoadWalletRetForBuild != DB_LOAD_OK)                                   // MCHN-TODO wallet recovery
             {
-                return InitError(_("wallet.dat corrupted. Please remove it and restart."));            
+                if (GetBoolArg("-salvagewallet", false))
+                {
+                    return InitError(_("wallet.dat corrupted. Please remove it and restart."));            
+                }
+                return InitError(_("wallet.dat corrupted. Please try running MultiChain with -salvagewallet."));                            
             }
 
             if(!pwalletMain->vchDefaultKey.IsValid())
             {
-                LogPrintf("mchn: Default key is not found - creating new... \n");
-                // Create new keyUser and set as default key
-                RandAddSeedPerfmon();
-
-                pwalletMain->SetMinVersion(FEATURE_LATEST); // permanently upgrade the wallet immediately
-                CPubKey newDefaultKey;
-                if (pwalletMain->GetKeyFromPool(newDefaultKey)) {
-                    pwalletMain->SetDefaultKey(newDefaultKey);
+                if(init_privkey.size())
+                {
+                    LogPrintf("mchn: Default key is specified using -initprivkey - not created\n");                
                 }
+                else
+                {
+                    LogPrintf("mchn: Default key is not found - creating new... \n");
+                    // Create new keyUser and set as default key
+        //            RandAddSeedPerfmon();
+
+                    pwalletMain->SetMinVersion(FEATURE_LATEST); // permanently upgrade the wallet immediately
+                    CPubKey newDefaultKey;
+                    if (pwalletMain->GetKeyFromPool(newDefaultKey)) {
+                        pwalletMain->SetDefaultKey(newDefaultKey);
+                    }
+                }
+            }
+            else
+            {
+                if(init_privkey.size())
+                {
+                    LogPrintf("mchn: Wallet already has default key, -initprivkey is ignored\n");                
+                    if(!GetBoolArg("-shortoutput", false))
+                    {    
+                        sprintf(bufOutput,"Wallet already has default key, -initprivkey is ignored\n\n");
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+                    }
+                    init_privkey="";
+                }            
             }            
         }
         
         if(pwalletMain)
         {
+            if(init_privkey.size())
+            {
+                string init_privkey_error=pwalletMain->SetDefaultKeyIfInvalid(init_privkey);
+                if(init_privkey_error.size())
+                {
+                    return InitError(strprintf("Cannot set initial private key: %s",init_privkey_error));                            
+                }
+                init_privkey="";
+            }
+            
             if(fFirstRunForBuild || (pwalletMain->mapAddressBook.size() == 0))
             {
                 if (!pwalletMain->SetAddressBook(pwalletMain->vchDefaultKey.GetID(), "", "receive"))
@@ -1481,12 +1807,9 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                 {
                     LogPrint("mchn","mchn: Default admin    address: %s\n",CBitcoinAddress(pkey.GetID()).ToString().c_str());                
                 }
-                if(mc_gState->m_Features->ActivatePermission())
+                if(pwalletMain->GetKeyFromAddressBook(pkey,MC_PTP_ACTIVATE))
                 {
-                    if(pwalletMain->GetKeyFromAddressBook(pkey,MC_PTP_ACTIVATE))
-                    {
-                        LogPrint("mchn","mchn: Default activate address: %s\n",CBitcoinAddress(pkey.GetID()).ToString().c_str());                
-                    }
+                    LogPrint("mchn","mchn: Default activate address: %s\n",CBitcoinAddress(pkey.GetID()).ToString().c_str());                
                 }
             }
             else
@@ -1523,11 +1846,18 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                     mc_CloseFile(fileHan);                    
                 }
                                 
-//                mc_gState->m_NetworkParams->SetParam("seednode",seed_node,strlen(seed_node)+1);
-//                mc_gState->m_NetworkParams->Write(1);
             }
             if(pwalletMain)
             {
+                if(init_privkey.size())
+                {
+                    string init_privkey_error=pwalletMain->SetDefaultKeyIfInvalid(init_privkey);
+                    if(init_privkey_error.size())
+                    {
+                        return InitError(strprintf("Cannot set initial private key: %s",init_privkey_error));                            
+                    }
+                    init_privkey="";
+                }
                 if(pwalletMain->vchDefaultKey.IsValid())
                 {
                     LogPrintf("mchn: Minimal blockchain parameter set is created, default address: %s\n",
@@ -1538,58 +1868,29 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                             strErrors << _("Cannot write default address") << "\n";
                     }
                     
-                    
-                    if(seed_error.size())
-                    {
-                        sprintf(bufOutput,"\nError: %s\n\n",seed_error.c_str());
-                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));                        
+                    if(!GetBoolArg("-shortoutput", false))
+                    {    
+                        sprintf(bufOutput,"Blockchain successfully initialized.\n\n");             
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+                        sprintf(bufOutput,"Please ask blockchain admin or user having activate permission to let you connect and/or transact:\n");
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+
+                        sprintf(bufOutput,"multichain-cli %s grant %s connect\n",mc_gState->m_NetworkParams->Name(),
+                             CBitcoinAddress(pwalletMain->vchDefaultKey.GetID()).ToString().c_str());
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+                        sprintf(bufOutput,"multichain-cli %s grant %s connect,send,receive\n\n",mc_gState->m_NetworkParams->Name(),
+                             CBitcoinAddress(pwalletMain->vchDefaultKey.GetID()).ToString().c_str());
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
                     }
                     else
                     {
-                        if(!GetBoolArg("-shortoutput", false))
-                        {    
-                            sprintf(bufOutput,"Blockchain successfully initialized.\n\n");             
-                            bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-                            if(mc_gState->m_Features->ActivatePermission())
-                            {
-                                sprintf(bufOutput,"Please ask blockchain admin or user having activate permission to let you connect and/or transact:\n");
-                                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-                            }
-                            else
-                            {
-                                sprintf(bufOutput,"Please ask blockchain admin to let you connect and/or transact:\n");
-                                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-                            }
-
-                            sprintf(bufOutput,"multichain-cli %s grant %s connect\n",mc_gState->m_NetworkParams->Name(),
-                                 CBitcoinAddress(pwalletMain->vchDefaultKey.GetID()).ToString().c_str());
-                            bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-                            sprintf(bufOutput,"multichain-cli %s grant %s connect,send,receive\n\n",mc_gState->m_NetworkParams->Name(),
-                                 CBitcoinAddress(pwalletMain->vchDefaultKey.GetID()).ToString().c_str());
-                            bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-                        }
-                        else
-                        {
-                            sprintf(bufOutput,"%s\n",CBitcoinAddress(pwalletMain->vchDefaultKey.GetID()).ToString().c_str());                            
-                            bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-                        }
+                        sprintf(bufOutput,"%s\n",CBitcoinAddress(pwalletMain->vchDefaultKey.GetID()).ToString().c_str());                            
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
                     }
-                    
-/*                    
-                    delete pwalletMain;
-                    pwalletMain=NULL;
- */ 
                     return false;
                 }
             }
         }    
-/*
-        if(pwalletMain)
-        {
-            delete pwalletMain;
-            pwalletMain=NULL;
-        }
-*/
         if(seed_error.size())
         {
             return InitError(_(seed_error.c_str()));        
@@ -1601,15 +1902,54 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
     LogPrintf("Node paused state is set to %08X\n",mc_gState->m_NodePausedState);
     
     pwalletMain=NULL;
-    
+
+    string rpc_threads_error="";
     if (fServer)
     {
+        JSON_DOUBLE_DECIMAL_DIGITS=GetArg("-apidecimaldigits",-1);        
         uiInterface.InitMessage.connect(SetRPCWarmupStatus);
-        StartRPCThreads();
+        StartRPCThreads(rpc_threads_error);
     }
 /* MCHN END*/        
     
-
+        ::minRelayTxFee = CFeeRate(MIN_RELAY_TX_FEE); 
+        if (mapArgs.count("-mintxfee"))
+        {
+            CAmount n = 0;
+            if (ParseMoney(mapArgs["-mintxfee"], n) && n > 0)
+                CWallet::minTxFee = CFeeRate(n);
+            else
+                return InitError(strprintf(_("Invalid amount for -mintxfee=<amount>: '%s'"), mapArgs["-mintxfee"]));
+        }
+        if (mapArgs.count("-paytxfee"))
+        {
+            CAmount nFeePerK = 0;
+            if (!ParseMoney(mapArgs["-paytxfee"], nFeePerK))
+                return InitError(strprintf(_("Invalid amount for -paytxfee=<amount>: '%s'"), mapArgs["-paytxfee"]));
+            if (nFeePerK > nHighTransactionFeeWarning)
+                InitWarning(_("Warning: -paytxfee is set very high! This is the transaction fee you will pay if you send a transaction."));
+            payTxFee = CFeeRate(nFeePerK, 1000);
+            if (payTxFee < ::minRelayTxFee)
+            {
+                return InitError(strprintf(_("Invalid amount for -paytxfee=<amount>: '%s' (must be at least %s)"),
+                                           mapArgs["-paytxfee"], ::minRelayTxFee.ToString()));
+            }
+        }
+        if (mapArgs.count("-maxtxfee"))
+        {
+            CAmount nMaxFee = 0;
+            if (!ParseMoney(mapArgs["-maxtxfee"], nMaxFee))
+                return InitError(strprintf(_("Invalid amount for -maxtxfee=<amount>: '%s'"), mapArgs["-maptxfee"]));
+            if (nMaxFee > nHighTransactionMaxFeeWarning)
+                InitWarning(_("Warning: -maxtxfee is set very high! Fees this large could be paid on a single transaction."));
+            maxTxFee = nMaxFee;
+            if (CFeeRate(maxTxFee, 1000) < ::minRelayTxFee)
+            {
+                return InitError(strprintf(_("Invalid amount for -maxtxfee=<amount>: '%s' (must be at least the minrelay fee of %s to prevent stuck transactions)"),
+                                           mapArgs["-maxtxfee"], ::minRelayTxFee.ToString()));
+            }
+        }
+        
 #endif // ENABLE_WALLET
     // ********************************************************* Step 6: network initialization
 
@@ -1711,6 +2051,22 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
             return InitError(_("Failed to listen on any port. Use -listen=0 if you want this."));
     }
 /* MCHN START */    
+    std::string strResult;
+    pFilterEngine=new mc_FilterEngine();
+    if (pFilterEngine->Initialize(strResult) != MC_ERR_NOERROR)
+    {
+        return InitError(strprintf(_("Couldn't initialize filter engine: '%s'"), strResult));
+    }
+    
+    pMultiChainFilterEngine=new mc_MultiChainFilterEngine;
+    if(pMultiChainFilterEngine->Initialize())
+    {
+        return InitError(_("Couldn't initialize filter engine."));        
+    }
+    
+    
+    pRelayManager=new mc_RelayManager;
+    
     int max_ips=64;
     uint32_t all_ips[64];
     int found_ips=1;
@@ -1718,30 +2074,77 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
     {
         found_ips=mc_FindIPv4ServerAddress(all_ips,max_ips);
     }
+    else
+    {
+        all_ips[0]=mc_gState->m_IPv4Address;
+    }
+    pRelayManager->SetMyIPs(all_ips,found_ips);
+    
     if(!GetBoolArg("-shortoutput", false))
-    {    
-        sprintf(bufOutput,"Other nodes can connect to this node using:\n");
-        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-        sprintf(bufOutput,"multichaind %s:%d\n\n",MultichainServerAddress().c_str(),GetListenPort());
-        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-        if(found_ips > 1)
+    {
+        if(fListen && !GetBoolArg("-offline",false))
         {
-            sprintf(bufOutput,"\nThis host has multiple IP addresses, so from some networks:\n");
+            sprintf(bufOutput,"Other nodes can connect to this node using:\n");
             bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-            for(int i_ips=0;i_ips<found_ips;i_ips++)
+            sprintf(bufOutput,"multichaind %s:%d\n\n",MultichainServerAddress().c_str(),GetListenPort());
+            bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+            if(found_ips > 1)
             {
-                if(all_ips[i_ips] != mc_gState->m_IPv4Address)
+                sprintf(bufOutput,"This host has multiple IP addresses, so from some networks:\n");
+                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+                for(int i_ips=0;i_ips<found_ips;i_ips++)
                 {
-                    unsigned char *ptr;
-                    ptr=(unsigned char *)(all_ips+i_ips);
-                    sprintf(bufOutput,"multichaind %s@%u.%u.%u.%u:%d\n\n",mc_gState->m_NetworkParams->Name(),ptr[3],ptr[2],ptr[1],ptr[0],GetListenPort());
-                    bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-                    if(bytes_written != strlen(bufOutput))
+                    if(all_ips[i_ips] != mc_gState->m_IPv4Address)
                     {
-                        found_ips=0;
+                        unsigned char *ptr;
+                        ptr=(unsigned char *)(all_ips+i_ips);
+                        sprintf(bufOutput,"multichaind %s@%u.%u.%u.%u:%d\n",mc_gState->m_NetworkParams->Name(),ptr[3],ptr[2],ptr[1],ptr[0],GetListenPort());
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+                        if(bytes_written != strlen(bufOutput))
+                        {
+                            found_ips=0;
+                        }
+                    }                
+                }        
+                sprintf(bufOutput,"\n");
+                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+            }
+            if (mapArgs.count("-externalip")) 
+            {            
+                sprintf(bufOutput,"Based on the -externalip setting, this node is reachable at:\n");
+                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+                BOOST_FOREACH(string strAddr, mapMultiArgs["-externalip"]) 
+                {
+                    int port;
+                    string s_ip=mc_ParseIPPort(strAddr,&port);
+                    if(port>0)
+                    {
+                        sprintf(bufOutput,"multichaind %s@%s\n",mc_gState->m_NetworkParams->Name(),strAddr.c_str());
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+                        port=GetListenPort();
                     }
-                }                
-            }        
+                    else
+                    {
+                        sprintf(bufOutput,"multichaind %s@%s:%d\n",mc_gState->m_NetworkParams->Name(),strAddr.c_str(),GetListenPort());
+                        bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));                    
+                    }
+                }
+                sprintf(bufOutput,"\n");
+                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+            }
+        }
+        else
+        {
+            if(GetBoolArg("-offline",false))
+            {                
+                sprintf(bufOutput,"MultiChain started in offline mode, other nodes cannot connect.\n\n");
+                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));            
+            }
+            else
+            {
+                sprintf(bufOutput,"Other nodes cannot connect to this node because the runtime parameter listen=0\n\n");
+                bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));            
+            }
         }
     }
     else
@@ -1750,24 +2153,24 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
         bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
     }
 
-    int version=mc_gState->m_NetworkParams->GetInt64Param("protocolversion");
-    if(version != mc_gState->GetProtocolVersion())
-    {
-        if(!GetBoolArg("-shortoutput", false))
-        {    
-            sprintf(bufOutput,"Protocol version %d\n\n",version);            
-            bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
-        }
-    }
     
 /* MCHN END */    
 
     if (mapArgs.count("-externalip")) {
         BOOST_FOREACH(string strAddr, mapMultiArgs["-externalip"]) {
-            CService addrLocal(strAddr, GetListenPort(), fNameLookup);
+            int port;
+            string s_ip=mc_ParseIPPort(strAddr,&port);
+            if(port<=0)
+            {
+                port=GetListenPort();
+            }
+            
+//            CService addrLocal(strAddr, GetListenPort(), fNameLookup);
+            CService addrLocal(s_ip, port, fNameLookup);
             if (!addrLocal.IsValid())
                 return InitError(strprintf(_("Cannot resolve -externalip address: '%s'"), strAddr));
-            AddLocal(CService(strAddr, GetListenPort(), fNameLookup), LOCAL_MANUAL);
+//            AddLocal(CService(strAddr, GetListenPort(), fNameLookup), LOCAL_MANUAL);
+            AddLocal(CService(s_ip, port, fNameLookup), LOCAL_MANUAL);
         }
     }
 
@@ -1776,6 +2179,14 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
 
     // ********************************************************* Step 7: load block chain
 
+/* MCHN START */    
+    std::string strBannedTxError=SetBannedTxs(GetArg("-bantx",""));
+    if(strBannedTxError.size())    
+    {
+        return InitError(strBannedTxError);        
+    }
+/* MCHN END */    
+    
     fReindex = GetBoolArg("-reindex", false);
 
     // Upgrading to 0.8; hard-link the old blknnnn.dat files into /blocks/
@@ -1846,11 +2257,32 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                 if (fReindex)
                     pblocktree->WriteReindexing(true);
 
+                if(mc_gState->m_WalletMode & MC_WMD_TXS)
+                {
+                    bool fFirstRunForLoadChain = true;
+                    pwalletMain = new CWallet(strWalletFile);
+                    DBErrors nLoadWalletRetForLoadChain = pwalletMain->LoadWallet(fFirstRunForLoadChain);
+                    if (nLoadWalletRetForLoadChain != DB_LOAD_OK)
+                    {
+                        strLoadError = _("Error loading wallet before loading chain");
+                        break;
+                    }
+                    pwalletTxsMain->BindWallet(pwalletMain);
+                }
+    
+                
                 if (!LoadBlockIndex()) {
                     strLoadError = _("Error loading block database");
                     break;
                 }
 
+                if(pwalletMain)
+                {
+                    pwalletTxsMain->BindWallet(NULL);
+                    delete pwalletMain;
+                    pwalletMain=NULL;
+                }
+                
                 // If the loaded chain has a wrong genesis, bail out immediately
                 // (we're likely using a testnet datadir, or the other way around).
                 if (!mapBlockIndex.empty() && mapBlockIndex.count(Params().HashGenesisBlock()) == 0)
@@ -1894,11 +2326,6 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
                     strLoadError + ".\n\n" + _("Please restart multichaind with reindex=1."),
                     "", CClientUIInterface::BTN_ABORT);
                 
-/*                
-                bool fRet = uiInterface.ThreadSafeMessageBox(
-                    strLoadError + ".\n\n" + _("Do you want to rebuild the block database now?"),
-                    "", CClientUIInterface::MSG_ERROR | CClientUIInterface::BTN_ABORT);
- */ 
 /* MCHN END */                
                 if (fRet) {
                     fReindex = true;
@@ -1912,6 +2339,7 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
             }
         }
     }
+    
 
     // As LoadBlockIndex can take several minutes, it's possible the user
     // requested to kill the GUI during the last operation. If so, exit.
@@ -1930,6 +2358,57 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
         mempool.ReadFeeEstimates(est_filein);
     fFeeEstimatesInitialized = true;
 
+    if(mapMultiArgs.count("-rpcallowip") == 0)
+    {
+        if(!GetBoolArg("-shortoutput", false))
+        {    
+            sprintf(bufOutput,"Listening for API requests on port %d (local only - see rpcallowip setting)\n\n",(int)GetArg("-rpcport", BaseParams().RPCPort()));                            
+            bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));        
+        }
+    }
+    if(rpc_threads_error.size())
+    {
+        if(!GetBoolArg("-shortoutput", false))
+        {    
+            sprintf(bufOutput,"%s\n",rpc_threads_error.c_str());                            
+            bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));        
+        }            
+    }
+    
+//    int version=mc_gState->m_NetworkParams->GetInt64Param("protocolversion");
+    int version=mc_gState->m_NetworkParams->ProtocolVersion();
+    LogPrintf("MultiChain protocol version: %d\n",version);
+    if(version != mc_gState->GetProtocolVersion())
+    {
+        if(!GetBoolArg("-shortoutput", false))
+        {    
+            int original_protocol_version=(int)mc_gState->m_NetworkParams->GetInt64Param("protocolversion");
+
+            if(version != original_protocol_version)
+            {
+                sprintf(bufOutput,"Chain running protocol version %d (chain created with %d)\n\n",version,original_protocol_version);                            
+            }
+            else
+            {
+                sprintf(bufOutput,"Chain running protocol version %d\n\n",version);            
+            }
+            bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
+        }
+    }
+    
+        
+    if(pEF->Initialize(mc_gState->m_Params->NetworkName(),0))
+    {
+        fprintf(stderr,"\nError: Cannot intitialize Enterprise features. Exiting...\n\n");
+        return false;        
+    }
+    if(rescan_subscriptions)
+    {
+        pEF->STR_PutSubscriptions(rescan_subscriptions);            
+        delete rescan_subscriptions;
+    }            
+        
+    
     // ********************************************************* Step 8: load wallet
 #ifdef ENABLE_WALLET
     if (fDisableWallet) {
@@ -2001,7 +2480,7 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
         if (fFirstRun)
         {
             // Create new keyUser and set as default key
-            RandAddSeedPerfmon();
+//            RandAddSeedPerfmon();
 
             CPubKey newDefaultKey;
             if (pwalletMain->GetKeyFromPool(newDefaultKey)) {
@@ -2073,6 +2552,20 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
 /* MCHN START */  
         pwalletMain->lpWalletTxs=pwalletTxsMain;
         pwalletMain->InitializeUnspentList();
+
+        {
+            LOCK(cs_main);
+            uint32_t paused=mc_gState->m_NodePausedState;
+            mc_gState->m_NodePausedState=MC_NPS_MINING | MC_NPS_INCOMING;
+            std::string strLockBlockError=SetLockedBlock(GetArg("-lockblock",""));
+            mc_gState->m_NodePausedState=paused;
+            if(strLockBlockError.size())    
+            {
+                return InitError(strLockBlockError);        
+            }
+        }
+    
+        
 /* MCHN END */        
     } // (!fDisableWallet)
 #else // ENABLE_WALLET
@@ -2094,11 +2587,14 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
         BOOST_FOREACH(string strFile, mapMultiArgs["-loadblock"])
             vImportFiles.push_back(strFile);
     }
-    threadGroup.create_thread(boost::bind(&ThreadImport, vImportFiles));
-    if (chainActive.Tip() == NULL) {
-        LogPrintf("Waiting for genesis block to be imported...\n");
-        while (!fRequestShutdown && chainActive.Tip() == NULL)
-            MilliSleep(10);
+    if(!GetBoolArg("-offline",false))
+    {    
+        threadGroup.create_thread(boost::bind(&ThreadImport, vImportFiles));
+        if (chainActive.Tip() == NULL) {
+            LogPrintf("Waiting for genesis block to be imported...\n");
+            while (!fRequestShutdown && chainActive.Tip() == NULL)
+                MilliSleep(10);
+        }
     }
 
     // ********************************************************* Step 10: start node
@@ -2109,7 +2605,10 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
     if (!strErrors.str().empty())
         return InitError(strErrors.str());
 
-    RandAddSeedPerfmon();
+    pRelayManager->Initialize();
+
+    
+//    RandAddSeedPerfmon();
 
     //// debug print
     LogPrintf("mapBlockIndex.size() = %u\n",   mapBlockIndex.size());
@@ -2124,48 +2623,50 @@ bool AppInit2(boost::thread_group& threadGroup,int OutputPipe)
     else
     {
         LogPrintf("mapWallet.size() = %u\n",       pwalletMain ? pwalletMain->mapWallet.size() : 0);
-/*        
-        BOOST_FOREACH(PAIRTYPE(const uint256, CWalletTx)& item, pwalletMain->mapWallet)
-        {
-            printf("%s\n",item.first.ToString().c_str());
-            printf("%s\n",item.second.ToString().c_str());
-        }       
- */  
     }
     LogPrintf("mapAddressBook.size() = %u\n",  pwalletMain ? pwalletMain->mapAddressBook.size() : 0);
 #endif
 
-    StartNode(threadGroup);
+    if (pwalletMain)
+        bitdbwrap.Flush(false);
+    
+    if(!GetBoolArg("-offline",false))
+    {
+        StartNode(threadGroup);
 
 #ifdef ENABLE_WALLET
     // Generate coins in the background
-    if (pwalletMain)
-/* MCHN START */        
-//        GenerateBitcoins(GetBoolArg("-gen", false), pwalletMain, GetArg("-genproclimit", 1));
-        GenerateBitcoins(GetBoolArg("-gen", true), pwalletMain, GetArg("-genproclimit", 1));
-/* MCHN END */        
+        if (pwalletMain)
+            GenerateBitcoins(GetBoolArg("-gen", true), pwalletMain, GetArg("-genproclimit", 1));
 #endif
 
     // ********************************************************* Step 11: finished
-
+/*
     SetRPCWarmupFinished();
     uiInterface.InitMessage(_("Done loading"));
+*/    
+#ifdef ENABLE_WALLET
+        if (pwalletMain) {
+            // Add wallet transactions that aren't already in a block to mapTransactions
+            pwalletMain->ReacceptWalletTransactions();
+        }
+#endif
+    }
     
 #ifdef ENABLE_WALLET
     if (pwalletMain) {
-        // Add wallet transactions that aren't already in a block to mapTransactions
-        pwalletMain->ReacceptWalletTransactions();
-
         // Run a thread to flush wallet periodically
         threadGroup.create_thread(boost::bind(&ThreadFlushWalletDB, boost::ref(pwalletMain->strWalletFile)));
     }
 #endif
 
+    SetRPCWarmupFinished();                                                     // Should be here, otherwise wallet can double spend
+    uiInterface.InitMessage(_("Done loading"));
 
 /* MCHN START */    
     if(!GetBoolArg("-shortoutput", false))
     {    
-        sprintf(bufOutput,"Node started\n");
+        sprintf(bufOutput,"Node ready.\n\n");
         bytes_written=write(OutputPipe,bufOutput,strlen(bufOutput));
     }
     mc_InitRPCHelpMap();

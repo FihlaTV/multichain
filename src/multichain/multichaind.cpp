@@ -1,6 +1,6 @@
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "version/clientversion.h"
@@ -10,6 +10,7 @@
 #include "ui/noui.h"
 #include "ui/ui_interface.h"
 #include "utils/util.h"
+#include "community/community.h"
 
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -19,6 +20,8 @@
 #include "multichain/multichain.h"
 #include "chainparams/globals.h"
 static bool fDaemon;
+
+mc_EnterpriseFeatures* pEF = NULL;
 
 void DebugPrintClose();
 
@@ -51,6 +54,20 @@ bool mc_DoesParentDataDirExist()
     return true;
 }
 
+bool mc_DoesParentLogDirExist()
+{
+    if (mapArgs.count("-logdir"))
+    {
+        boost::filesystem::path path=boost::filesystem::system_complete(mapArgs["-logdir"]);
+        if (!boost::filesystem::is_directory(path)) 
+        {
+            return false;
+        }    
+    }
+    return true;
+}
+
+
 //////////////////////////////////////////////////////////////////////////////
 //
 // Start
@@ -77,7 +94,10 @@ bool AppInit(int argc, char* argv[])
         
     mc_gState=new mc_State;
     
-    mc_gState->m_Params->Parse(argc, argv);
+    mc_gState->m_Params->Parse(argc, argv, MC_ETP_DAEMON);
+    mc_CheckDataDirInConfFile();
+    
+    mc_RandomSeed(mc_TimeNowAsUInt());
     
     if(mc_gState->m_Params->NetworkName())
     {
@@ -87,13 +107,37 @@ bool AppInit(int argc, char* argv[])
             return false;
         }
     }
-
+       
+    
+    
     if(!mc_DoesParentDataDirExist())
     {
         fprintf(stderr,"\nError: Data directory %s needs to exist before calling multichaind. Exiting...\n\n",mapArgs["-datadir"].c_str());
+        delete mc_gState;
         return false;        
     }
         
+    if(!mc_DoesParentLogDirExist())
+    {
+        fprintf(stderr,"\nError: Log directory %s needs to exist before calling multichaind. Exiting...\n\n",mapArgs["-logdir"].c_str());
+        return false;        
+    }
+    
+    pEF=new mc_EnterpriseFeatures;
+/*    
+    if(pEF->Initialize(mc_gState->m_Params->NetworkName(),0))
+    {
+        fprintf(stderr,"\nError: Data directory %s needs to exist before calling multichaind. Exiting...\n\n",mapArgs["-datadir"].c_str());
+        delete mc_gState;
+        return false;        
+    }
+*/
+    string edition=pEF->ENT_Edition();
+    if(edition.size())
+    {
+        edition=edition+" Edition, ";
+    }
+    
     
     mc_gState->m_Params->HasOption("-?");
             
@@ -103,7 +147,7 @@ bool AppInit(int argc, char* argv[])
         mc_gState->m_Params->HasOption("-version") || 
         (mc_gState->m_Params->NetworkName() == NULL))
     {
-        fprintf(stdout,"\nMultiChain Core Daemon %s\n\n",mc_gState->GetFullVersion());
+        fprintf(stdout,"\nMultiChain %s Daemon (%sprotocol %s)\n\n",mc_BuildDescription(mc_gState->GetNumericVersion()).c_str(),edition.c_str(),mc_SupportedProtocols().c_str());
         std::string strUsage = "";
         if (mc_gState->m_Params->HasOption("-version"))
         {
@@ -119,13 +163,14 @@ bool AppInit(int argc, char* argv[])
 
         fprintf(stdout, "%s", strUsage.c_str());
 
+        delete pEF;
         delete mc_gState;                
-        return false;
+        return true;
     }
 
     if(!GetBoolArg("-shortoutput", false))
     {
-        fprintf(stdout,"\nMultiChain Core Daemon %s\n\n",mc_gState->GetFullVersion());
+        fprintf(stdout,"\nMultiChain %s Daemon (%slatest protocol %d)\n\n",mc_BuildDescription(mc_gState->GetNumericVersion()).c_str(),edition.c_str(),mc_gState->GetProtocolVersion());
     }
     
     pipes[1]=STDOUT_FILENO;
@@ -135,11 +180,12 @@ bool AppInit(int argc, char* argv[])
         
         if (fDaemon)
         {
+            delete pEF;
             delete mc_gState;                
             
             if(!GetBoolArg("-shortoutput", false))
             {
-                fprintf(stdout, "MultiChain server starting\n");
+                fprintf(stdout, "Starting up node...\n\n");
             }
             
             if (pipe(pipes)) 
@@ -189,7 +235,10 @@ bool AppInit(int argc, char* argv[])
             
             mc_gState=new mc_State;
 
-            mc_gState->m_Params->Parse(argc, argv);
+            mc_gState->m_Params->Parse(argc, argv, MC_ETP_DAEMON);
+            mc_CheckDataDirInConfFile();
+            
+            pEF=new mc_EnterpriseFeatures;
         }
 #endif
         
@@ -200,6 +249,7 @@ bool AppInit(int argc, char* argv[])
     if(err)
     {
         fprintf(stderr,"ERROR: Couldn't read parameter file for blockchain %s. Exiting...\n",mc_gState->m_Params->NetworkName());
+        delete pEF;
         delete mc_gState;                
         return false;
     }
@@ -208,6 +258,7 @@ bool AppInit(int argc, char* argv[])
     if(err)
     {
         fprintf(stderr,"ERROR: Couldn't read configuration file for blockchain %s. Please try upgrading MultiChain. Exiting...\n",mc_gState->m_Params->NetworkName());
+        delete pEF;
         delete mc_gState;                
         return false;
     }
@@ -216,6 +267,7 @@ bool AppInit(int argc, char* argv[])
     if(err)
     {
         fprintf(stderr,"ERROR: Couldn't validate parameter set for blockchain %s. Exiting...\n",mc_gState->m_Params->NetworkName());
+        delete pEF;
         delete mc_gState;                
         return false;
     }
@@ -231,19 +283,53 @@ bool AppInit(int argc, char* argv[])
     err=mc_gState->m_Permissions->Initialize(mc_gState->m_Params->NetworkName(),0);                                
     if(err)
     {
-        fprintf(stderr,"\nERROR: Couldn't initialize permission database for blockchain %s. Probably multichaind for this blockchain is already running. Exiting...\n",mc_gState->m_Params->NetworkName());
+        if(err == MC_ERR_CORRUPTED)
+        {
+            fprintf(stderr,"\nERROR: Couldn't initialize permission database for blockchain %s. Please restart multichaind with reindex=1.\n",mc_gState->m_Params->NetworkName());                        
+        }
+        else
+        {
+            fprintf(stderr,"\nERROR: Couldn't initialize permission database for blockchain %s. Probably multichaind for this blockchain is already running. Exiting...\n",mc_gState->m_Params->NetworkName());
+        }
+        delete pEF;
         delete mc_gState;                
         return false;
     }
 
-    if( (mc_gState->m_NetworkParams->GetParam("protocolversion",&size) != NULL) &&
-        (mc_gState->GetProtocolVersion() < (int)mc_gState->m_NetworkParams->GetInt64Param("protocolversion")) )
+    if(mc_gState->m_NetworkParams->GetParam("protocolversion",&size) != NULL)
     {
-            fprintf(stderr,"ERROR: Parameter set for blockchain %s was generated by MultiChain running newer protocol version (%d)\n\n",
-                    mc_gState->m_Params->NetworkName(),(int)mc_gState->m_NetworkParams->GetInt64Param("protocolversion"));                        
-            fprintf(stderr,"Please upgrade MultiChain\n\n");
-            delete mc_gState;                
-            return false;
+        int protocol_version=(int)mc_gState->m_NetworkParams->GetInt64Param("protocolversion");
+
+        if(mc_gState->IsSupported(protocol_version) == 0) 
+        {
+            if(mc_gState->IsDeprecated(protocol_version))
+            {
+                fprintf(stderr,"ERROR: The protocol version (%d) for blockchain %s has been deprecated and was last supported in MultiChain %s\n\n",
+                        protocol_version,mc_gState->m_Params->NetworkName(),
+                        mc_BuildDescription(-mc_gState->VersionInfo(protocol_version)).c_str());                        
+                delete pEF;
+                delete mc_gState;                
+                return false;
+            }
+            else
+            {
+                fprintf(stderr,"ERROR: Parameter set for blockchain %s was generated by MultiChain running newer protocol version (%d)\n\n",
+                        mc_gState->m_Params->NetworkName(),protocol_version);                        
+                fprintf(stderr,"Please upgrade MultiChain\n\n");
+                delete pEF;
+                delete mc_gState;                
+                return false;
+            }
+        }
+    }
+                        
+
+    if(!GetBoolArg("-verifyparamsethash", true))
+    {
+        if(mc_gState->m_NetworkParams->m_Status == MC_PRM_STATUS_INVALID)
+        {
+            mc_gState->m_NetworkParams->m_Status=MC_PRM_STATUS_VALID;
+        }
     }
     
     switch(mc_gState->m_NetworkParams->m_Status)
@@ -260,6 +346,7 @@ bool AppInit(int argc, char* argv[])
                 fprintf(stderr,"If you want to connect to existing blockchain please specify seed node:\n\n");
                 fprintf(stderr,"  multichaind %s@<seed-node-ip>\n",mc_gState->m_Params->NetworkName());
                 fprintf(stderr,"  multichaind %s@<seed-node-ip>:<seed-node-port>\n\n\n",mc_gState->m_Params->NetworkName());
+                delete pEF;
                 delete mc_gState;                
                 return false;
             }
@@ -267,13 +354,15 @@ bool AppInit(int argc, char* argv[])
         case MC_PRM_STATUS_ERROR:
             fprintf(stderr,"ERROR: Parameter set for blockchain %s has errors. Please run one of the following:\n\n",mc_gState->m_Params->NetworkName());                        
             fprintf(stderr,"  multichain-util create %s\n",mc_gState->m_Params->NetworkName());
-            fprintf(stderr,"  multichain-util clone <old-blockchain-name>%s\n",mc_gState->m_Params->NetworkName());
+            fprintf(stderr,"  multichain-util clone <old-blockchain-name> %s\n",mc_gState->m_Params->NetworkName());
             fprintf(stderr,"\nAnd rerun multichaind %s\n",mc_gState->m_Params->NetworkName());                        
+            delete pEF;
             delete mc_gState;                
             return false;
         case MC_PRM_STATUS_INVALID:
             fprintf(stderr,"ERROR: Parameter set for blockchain %s is invalid. You may generate new network using these parameters by running:\n\n",mc_gState->m_Params->NetworkName());                        
             fprintf(stderr,"  multichain-util clone %s <new-blockchain-name>\n",mc_gState->m_Params->NetworkName());
+            delete pEF;
             delete mc_gState;                
             return false;
         case MC_PRM_STATUS_GENERATED:
@@ -281,6 +370,7 @@ bool AppInit(int argc, char* argv[])
             break;
         default:
             fprintf(stderr,"INTERNAL ERROR: Unknown parameter set status %d\n",mc_gState->m_NetworkParams->m_Status);
+            delete pEF;
             delete mc_gState;                
             return false;
             break;
@@ -362,6 +452,7 @@ bool AppInit(int argc, char* argv[])
         }            
     }
     
+    delete pEF;
     delete mc_gState;
     
     if(datadir_to_delete.size())

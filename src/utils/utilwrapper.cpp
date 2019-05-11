@@ -1,6 +1,6 @@
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "multichain/multichain.h"
@@ -47,6 +47,7 @@
 #include "structs/hash.h"
 #include "core/main.h"
 #include "net/net.h"
+#include "custom/custom.h"
 
 #define MC_DCT_SEED_NODE_MAX_SIZE 32
 
@@ -70,12 +71,15 @@
 using namespace std;
 
 const boost::filesystem::path mc_GetDataDir(const char *network_name,int create);
+const boost::filesystem::path mc_GetLogDir(const char *network_name,int create);
 
-void mc_Params::Parse(int argc, const char* const argv[])
+void mc_Params::Parse(int argc, const char* const argv[],int exe_type)
 {
     int i,length;
-    const char* exe_name;
     ParseParameters(argc,argv);
+    mc_ExpandDataDirParam();
+    
+    custom_set_runtime_defaults(exe_type);
     
     m_NumArguments=0;
     length=MC_DCT_SEED_NODE_MAX_SIZE+1;
@@ -111,25 +115,13 @@ void mc_Params::Parse(int argc, const char* const argv[])
     
     if(m_NumArguments)
     {
-        exe_name=argv[0];
-        for(i=0;i<(int)strlen(argv[0]);i++)
-        {
-            if((argv[0][i]=='/') || (argv[0][i]=='\\'))
-            {
-                exe_name=argv[0]+i+1;
-            }
-        }
-        
-        if((strcmp(exe_name,"multichain-util") == 0) || (strcmp(exe_name,"multichain-util.exe") == 0))
+        if( exe_type == MC_ETP_UTIL )
         {
             m_FirstArgumentType=MC_FAT_COMMAND;
         }
         else
         {
-            if((strcmp(exe_name,"multichain-cli") == 0) || 
-               (strcmp(exe_name,"multichain-cli.exe") == 0) ||                     
-               (strcmp(exe_name,"multichaind") == 0) ||                     
-               (strcmp(exe_name,"multichaind.exe") == 0))
+            if( (exe_type == MC_ETP_CLI) || (exe_type == MC_ETP_DAEMON) ) 
             {
                 m_FirstArgumentType=MC_FAT_NETWORK;                
                 for(i=0;i<(int)strlen(m_Arguments[0]);i++)
@@ -143,7 +135,7 @@ void mc_Params::Parse(int argc, const char* const argv[])
                         }
                     }
                 }
-                if((m_FirstArgumentType == MC_FAT_NETWORK) && ((strcmp(exe_name,"multichaind") == 0) || (strcmp(exe_name,"multichaind.exe") == 0)))
+                if((m_FirstArgumentType == MC_FAT_NETWORK) && (exe_type == MC_ETP_DAEMON) )
                 {
                     m_Arguments[m_NumArguments]=m_Arguments[0]+length;
                     m_Arguments[m_NumArguments][0]=0x00;
@@ -153,25 +145,28 @@ void mc_Params::Parse(int argc, const char* const argv[])
                     int err;
                     const char *seed_node;
 
-                    mapConfig=new mc_MapStringString;
-
-                    err=mc_ReadGeneralConfigFile(mapConfig,mc_gState->m_Params->NetworkName(),"seed",".dat");
-
-                    if(err == MC_ERR_NOERROR)
+                    if(!GetBoolArg("-addnodeonly",false))
                     {
-                        seed_node=mapConfig->Get("seed");
+                        mapConfig=new mc_MapStringString;
 
-                        if(seed_node)
+                        err=mc_ReadGeneralConfigFile(mapConfig,mc_gState->m_Params->NetworkName(),"seed",".dat");
+
+                        if(err == MC_ERR_NOERROR)
                         {
-                            if(strlen(seed_node) <= MC_DCT_SEED_NODE_MAX_SIZE)
+                            seed_node=mapConfig->Get("seed");
+
+                            if(seed_node)
                             {
-                                strcpy(m_Arguments[m_NumArguments],seed_node);
-                                length+=strlen(seed_node);
+                                if(strlen(seed_node) <= MC_DCT_SEED_NODE_MAX_SIZE)
+                                {
+                                    strcpy(m_Arguments[m_NumArguments],seed_node);
+                                    length+=strlen(seed_node);
+                                }
                             }
                         }
-                    }
 
-                    delete mapConfig;                            
+                        delete mapConfig;                            
+                    }
                     m_NumArguments++;                                                                
                 }                
             }            
@@ -249,12 +244,26 @@ const char *mc_Params::DataDir(int network_specific,int create)
         name=NetworkName();
     }
     
-    boost::filesystem::path path=mc_GetDataDir(name,create);
+    boost::filesystem::path path;
     
     if(network_specific)
     {
-        strcpy(m_DataDirNetSpecific,path.string().c_str());
-        return m_DataDirNetSpecific;
+        if(network_specific == 1)
+        {
+            path=mc_GetDataDir(name,create);
+            strcpy(m_DataDirNetSpecific,path.string().c_str());
+            return m_DataDirNetSpecific;
+        }
+        else
+        {
+            path=mc_GetLogDir(name,create);        
+            strcpy(m_LogDirNetSpecific,path.string().c_str());
+            return m_LogDirNetSpecific;
+        }    
+    }
+    else
+    {
+        path=mc_GetDataDir(name,create);        
     }
     
     strcpy(m_DataDir,path.string().c_str());
@@ -279,29 +288,30 @@ int64_t mc_Params::HasOption(const char* strArg)
 
 boost::filesystem::path mc_GetDefaultDataDir()
 {
-    // Windows < Vista: C:\Documents and Settings\Username\Application Data\Bitcoin
-    // Windows >= Vista: C:\Users\Username\AppData\Roaming\Bitcoin
-    // Mac: ~/Library/Application Support/Bitcoin
-    // Unix: ~/.bitcoin
+    // Windows < Vista: C:\Documents and Settings\Username\Application Data\MultiChain
+    // Windows >= Vista: C:\Users\Username\AppData\Roaming\MultiChain
+    // Mac and Unix: ~/.multichain
 #ifdef WIN32
     // Windows
+    if(mc_gState->m_SessionFlags & MC_SSF_COLD)
+    {
+        return GetSpecialFolderPath(CSIDL_APPDATA) / "MultiChainCold";
+    }
     return GetSpecialFolderPath(CSIDL_APPDATA) / "MultiChain";
 #else
+    // Mac and Unix
     boost::filesystem::path pathRet;
     char* pszHome = getenv("HOME");
     if (pszHome == NULL || strlen(pszHome) == 0)
         pathRet = boost::filesystem::path("/");
     else
         pathRet = boost::filesystem::path(pszHome);
-#ifdef MAC_OSX
-    // Mac
-    pathRet /= "Library/Application Support";
-    TryCreateDirectory(pathRet);
-    return pathRet / "Bitcoin";
-#else
-    // Unix
+    
+    if(mc_gState->m_SessionFlags & MC_SSF_COLD)
+    {
+        return pathRet / ".multichain-cold";        
+    }
     return pathRet / ".multichain";
-#endif
 #endif
 }
 
@@ -329,6 +339,62 @@ void mc_SetDataDirArg(char *buf)
 }
 
 
+void mc_ExpandDataDirParam()
+{
+    if (mapArgs.count("-datadir"))
+    {
+        string original=mapArgs["-datadir"];
+        if(original.size() > 1)
+        {
+            if( (*(original.c_str()) == '~') && (*(original.c_str() + 1) == '/') )
+            {
+                const char *homedir=__US_UserHomeDir();
+
+                if(homedir)
+                {
+                    mapArgs["-datadir"]=strprintf("%s%s",homedir,original.c_str()+1);                    
+                }
+            }
+        }
+    }    
+    if (mapArgs.count("-logdir"))
+    {
+        string original=mapArgs["-logdir"];
+        if(original.size() > 1)
+        {
+            if( (*(original.c_str()) == '~') && (*(original.c_str() + 1) == '/') )
+            {
+                const char *homedir=__US_UserHomeDir();
+
+                if(homedir)
+                {
+                    mapArgs["-logdir"]=strprintf("%s%s",homedir,original.c_str()+1);                    
+                }
+            }
+        }
+    }    
+}
+
+void mc_CheckDataDirInConfFile()
+{
+    if (mapArgs.count("-datadir"))
+    {
+        return;
+    }    
+    
+    mc_MapStringString *mapConfig;
+    
+    mapConfig=new mc_MapStringString;
+    if(mc_ReadGeneralConfigFile(mapConfig,NULL,"multichain",".conf") == 0)
+    {
+        if(mapConfig->Get("datadir") != NULL)
+        {
+            mapArgs["-datadir"]=strprintf("%s",mapConfig->Get("datadir"));            
+            mc_ExpandDataDirParam();
+        }
+    }    
+}
+
 
 const boost::filesystem::path mc_GetDataDir(const char *network_name,int create)
 {
@@ -353,6 +419,36 @@ const boost::filesystem::path mc_GetDataDir(const char *network_name,int create)
         boost::filesystem::create_directories(path);
     }
     return path;
+}
+
+const boost::filesystem::path mc_GetLogDir(const char *network_name,int create)
+{
+    boost::filesystem::path path;
+    if (mapArgs.count("-logdir")) {
+        path = boost::filesystem::system_complete(mapArgs["-logdir"]);
+        if (!boost::filesystem::is_directory(path)) 
+        {
+            return path;
+        }
+    } 
+    else 
+    {
+        return mc_GetDataDir(network_name,create);
+    }
+    if(network_name)
+    {
+        path /= std::string(network_name);
+    }
+    if(create)
+    {
+        boost::filesystem::create_directories(path);
+    }
+    return path;
+}
+
+void mc_CreateDir(const char *dir_name)
+{
+    boost::filesystem::create_directories(boost::filesystem::path(dir_name));    
 }
 
 void mc_RemoveDataDir(const char *network_name)
@@ -416,6 +512,9 @@ string mc_GetFullFileName(const char *network_name,const char *filename, const c
         case MC_FOM_RELATIVE_TO_DATADIR:
             pathFile = mc_GetDataDir(network_name,create) / fullName;
             break;
+        case MC_FOM_RELATIVE_TO_LOGDIR:
+            pathFile = mc_GetLogDir(network_name,create) / fullName;            
+            break;
     }
             
     return pathFile.string();    
@@ -464,7 +563,7 @@ FILE *mc_OpenFile(const char *network_name,const char *filename, const char *ext
 
 int mc_RemoveFile(const char *network_name,const char *filename, const char *extension,int options)        
 {    
-    return unlink(mc_GetFullFileName(network_name,filename,extension,options).c_str()); 
+    return __US_DeleteFile(mc_GetFullFileName(network_name,filename,extension,options).c_str()); 
 }
 
 
@@ -609,6 +708,8 @@ int mc_ReadConfigFile(
         set<string> setOptions;
         setOptions.insert("*");
 
+//        boost::program_options::detail::config_file_iterator it(streamConfig, setOptions), end;
+//        while(it != end)
         for (boost::program_options::detail::config_file_iterator it(streamConfig, setOptions), end; it != end; ++it)
         {
             // Don't overwrite existing settings so command line settings override bitcoin.conf
@@ -628,6 +729,15 @@ int mc_ReadConfigFile(
             {
                 (*mapMultiSettingsRet)[strKey].push_back(it->value[0]);
             }
+/*            
+            try
+            {
+                ++it;
+            }
+            catch(std::exception &e1) {
+                ++it;
+            }
+ */ 
         }
     } catch(std::exception &e) {
         fprintf(stderr,"ERROR: reading configuration file: %s\n", e.what());
@@ -649,6 +759,68 @@ int mc_ReadGeneralConfigFile(mc_MapStringString *mapConfig,const char *network_n
     return mc_ReadConfigFile(mc_GetConfigFile(network_name,file_name,extension),(std::map<string, string>*)mapConfig->mapObject, NULL,"");
 }
 
+int mc_BuildDescription(int build, char *desc)
+{
+    int v;
+    int c[5];
+    
+    v=build;
+    
+    c[4]=v%100;v/=100;
+    c[3]=v%10 ;v/=10 ;
+    c[2]=v%100;v/=100;
+    c[1]=v%100;v/=100;
+    c[0]=v%100;v/=100;
+    if(c[0] < 1)return MC_ERR_INVALID_PARAMETER_VALUE;
+    sprintf(desc,"%d.%d",c[0],c[1]);
+    if(c[2])
+    {
+        sprintf(desc+strlen(desc),".%d",c[2]);
+    }
+    switch(c[3])
+    {
+        case 1:
+            sprintf(desc+strlen(desc)," alpha ");
+            break;
+        case 2:
+            sprintf(desc+strlen(desc)," beta ");
+            break;
+        case 7:
+            sprintf(desc+strlen(desc)," build ");
+            break;
+        case 9:
+            if(c[4] != 1)return MC_ERR_INVALID_PARAMETER_VALUE;
+            break;
+        default:
+            return MC_ERR_INVALID_PARAMETER_VALUE;
+    }
+    if(c[3] != 9)
+    {
+        sprintf(desc+strlen(desc),"%d",c[4]);        
+    }
+    
+    return MC_ERR_NOERROR;
+}
+
+
+int mc_MultichainParams::SetProtocolGlobals()
+{
+    MCP_ALLOW_ARBITRARY_OUTPUTS=1; 
+    if(mc_gState->m_Features->FixedDestinationExtraction() != 0)
+    {
+        int aao=mc_gState->m_NetworkParams->GetInt64Param("allowarbitraryoutputs");
+        if(aao>=0)
+        {
+            MCP_ALLOW_ARBITRARY_OUTPUTS=aao;
+        }
+    }    
+    if(mc_gState->m_Features->ParameterUpgrades())
+    {
+        MAX_BLOCK_SIGOPS = MAX_BLOCK_SIZE/50;
+        MAX_TX_SIGOPS = MAX_BLOCK_SIGOPS/5;
+    }
+    return MC_ERR_NOERROR;
+}
 
 int mc_MultichainParams::SetGlobals()
 {
@@ -664,10 +836,26 @@ int mc_MultichainParams::SetGlobals()
     m_ProtocolVersion=ProtocolVersion();
     
     MIN_RELAY_TX_FEE=(unsigned int)GetInt64Param("minimumrelayfee");    
+    MIN_OFFCHAIN_FEE=(unsigned int)GetInt64Param("minimumoffchainfee");    
     MAX_OP_RETURN_RELAY=(unsigned int)GetInt64Param("maxstdopreturnsize");    
     MAX_OP_RETURN_RELAY=GetArg("-datacarriersize", MAX_OP_RETURN_RELAY);
     MAX_BLOCK_SIZE=(unsigned int)GetInt64Param("maximumblocksize");    
+    MAX_CHUNK_SIZE=(unsigned int)GetInt64Param("maximumchunksize");    
+    MAX_CHUNK_COUNT=(unsigned int)GetInt64Param("maximumchunkcount");    
     DEFAULT_BLOCK_MAX_SIZE=MAX_BLOCK_SIZE;    
+    while(MAX_BLOCK_SIZE>MAX_BLOCKFILE_SIZE)
+    {
+        MAX_BLOCKFILE_SIZE *= 2;
+    }
+    while(MAX_BLOCK_SIZE>MAX_SIZE)
+    {
+        MAX_SIZE *= 2;
+    }
+    while(MAX_CHUNK_SIZE+OFFCHAIN_MSG_PADDING>MAX_SIZE)
+    {
+        MAX_SIZE *= 2;
+    }
+    MIN_BLOCKS_BETWEEN_UPGRADES=(unsigned int)GetInt64Param("timingupgrademingap"); 
     MAX_STANDARD_TX_SIZE=(unsigned int)GetInt64Param("maxstdtxsize");    
     MAX_SCRIPT_ELEMENT_SIZE=(unsigned int)GetInt64Param("maxstdelementsize");
     COINBASE_MATURITY=(int)GetInt64Param("rewardspendabledelay");    
@@ -680,12 +868,37 @@ int mc_MultichainParams::SetGlobals()
         CENT=0;
         MAX_MONEY=0;
     }
-    
-    if(mc_gState->m_Features->ShortTxIDAsAssetRef() == 0)
+    MCP_MAX_STD_OP_RETURN_COUNT=mc_gState->m_NetworkParams->GetInt64Param("maxstdopreturnscount");
+    MCP_INITIAL_BLOCK_REWARD=mc_gState->m_NetworkParams->GetInt64Param("initialblockreward");
+    MCP_FIRST_BLOCK_REWARD=mc_gState->m_NetworkParams->GetInt64Param("firstblockreward");
+    MCP_TARGET_BLOCK_TIME=mc_gState->m_NetworkParams->GetInt64Param("targetblocktime");
+    MCP_ANYONE_CAN_ADMIN=mc_gState->m_NetworkParams->GetInt64Param("anyonecanadmin");
+    MCP_ANYONE_CAN_MINE=mc_gState->m_NetworkParams->GetInt64Param("anyonecanmine");
+    MCP_ANYONE_CAN_CONNECT=mc_gState->m_NetworkParams->GetInt64Param("anyonecanconnect");
+    MCP_ANYONE_CAN_SEND=mc_gState->m_NetworkParams->GetInt64Param("anyonecansend");
+    MCP_ANYONE_CAN_RECEIVE=mc_gState->m_NetworkParams->GetInt64Param("anyonecanreceive");
+    MCP_ANYONE_CAN_CREATE=mc_gState->m_NetworkParams->GetInt64Param("anyonecancreate");
+    MCP_ANYONE_CAN_ISSUE=mc_gState->m_NetworkParams->GetInt64Param("anyonecanissue");    
+    MCP_ANYONE_CAN_ACTIVATE=mc_gState->m_NetworkParams->GetInt64Param("anyonecanactivate");
+    if(mc_gState->m_Features->FixedIn1001120003())
     {
-        m_AssetRefSize=MC_AST_ASSET_REF_SIZE;
+        if(MCP_ANYONE_CAN_ADMIN)MCP_ANYONE_CAN_SEND=1;
+        if(MCP_ANYONE_CAN_ACTIVATE)MCP_ANYONE_CAN_SEND=1;
+        if(MCP_ANYONE_CAN_CREATE)MCP_ANYONE_CAN_SEND=1;
+        if(MCP_ANYONE_CAN_ISSUE)MCP_ANYONE_CAN_SEND=1;
     }
-    return MC_ERR_NOERROR;
+    MCP_MINIMUM_PER_OUTPUT=mc_gState->m_NetworkParams->GetInt64Param("minimumperoutput");
+    MCP_ALLOW_MULTISIG_OUTPUTS=mc_gState->m_NetworkParams->GetInt64Param("allowmultisigoutputs");
+    MCP_ALLOW_P2SH_OUTPUTS=mc_gState->m_NetworkParams->GetInt64Param("allowp2shoutputs");
+    MCP_WITH_NATIVE_CURRENCY=0;
+    if((mc_gState->m_NetworkParams->GetInt64Param("initialblockreward") != 0) || (mc_gState->m_NetworkParams->GetInt64Param("firstblockreward") > 0))
+    {
+        MCP_WITH_NATIVE_CURRENCY=1;
+    }
+    MCP_STD_OP_DROP_COUNT=mc_gState->m_NetworkParams->GetInt64Param("maxstdopdropscount");
+    MCP_STD_OP_DROP_SIZE=mc_gState->m_NetworkParams->GetInt64Param("maxstdopdropsize");
+    MCP_ANYONE_CAN_RECEIVE_EMPTY=mc_gState->m_NetworkParams->GetInt64Param("anyonecanreceiveempty");
+    return SetProtocolGlobals();
 }
 
 
@@ -725,6 +938,16 @@ void mc_SHA256::GetHash(unsigned char *hash)
     {
         ((CSHA256*)m_HashObject)->Finalize(hash);
     }        
+}
+
+void mc_SHA256::DoubleHash(const void *lpData,int size,void *hash)
+{
+    Reset();
+    Write(lpData,size);
+    GetHash((unsigned char *)hash);
+    Reset();
+    Write((unsigned char *)hash,32);
+    GetHash((unsigned char *)hash);    
 }
 
 int mc_MultichainParams::Import(const char *name,const char *source_address)
@@ -811,8 +1034,31 @@ int mc_FindIPv4ServerAddress(uint32_t *all_ips,int max_ips)
     result=0;
     c=0;
 
+#ifdef MAC_OSX
+    struct ifaddrs *ifaddr = NULL;
+    if (getifaddrs(&ifaddr) == -1) {
+	return c;
+    }
+    if (!ifaddr) {
+        return c;
+    }
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock > 0) {
+        for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+	    if (ifa->ifa_addr == 0) {
+                continue;
+	    }
+            int family = ifa->ifa_addr->sa_family;
+            if (family != AF_INET) {
+                continue;
+            }
+            uint32_t a = ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr.s_addr;
+            ptr=(unsigned char*)&a;
+
+#else
+
 #ifndef WIN32
-    
+
     int sock;
     struct ifreq ifreqs[20];
     struct ifconf ic;
@@ -840,6 +1086,8 @@ int mc_FindIPv4ServerAddress(uint32_t *all_ips,int max_ips)
             
 #endif    
         
+#endif    
+            
             if ((ptr[0] != 127) && (ptr[0] != 0))
             {
                 ip=((uint32_t)ptr[0]<<24)+((uint32_t)ptr[1]<<16)+((uint32_t)ptr[2]<<8)+(uint32_t)ptr[3];
@@ -867,7 +1115,13 @@ int mc_FindIPv4ServerAddress(uint32_t *all_ips,int max_ips)
             
         }
     }   
-    return c;
+#ifdef MAC_OSX
+    if (sock > 0) {
+	close(sock);
+    }
+    freeifaddrs(ifaddr);
+#endif
+     return c;
 }
 
         

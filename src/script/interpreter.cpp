@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "interpreter.h"
@@ -257,10 +257,6 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
     int nOpCount = 0;
     bool fRequireMinimal = (flags & SCRIPT_VERIFY_MINIMALDATA) != 0;
 
-/* MCHN START */            
-    bool fLongElement=false;
-/* MCHN END */            
-    
     try
     {
         while (pc < pend)
@@ -272,40 +268,7 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
             //
             if (!script.GetOp(pc, opcode, vchPushValue))
                 return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
-/* MCHN START */            
-            if(fLongElement)
-            {
-                if(mc_gState->m_Features->FixedIn10007() == 0)
-                {
-                    if(opcode != OP_DROP)
-                    {
-                        return set_error(serror, SCRIPT_ERR_PUSH_SIZE);                    
-                    }                
-                }
-            }
-            if(mc_gState->m_Features->Streams())                                // It is now part of the IsStandard check
-            {
-                fLongElement=false;                                
-            }
-            else
-            {
-                if (vchPushValue.size() > MAX_SCRIPT_ELEMENT_SIZE)
-                {
-                    if(mc_gState->m_Features->VerifySizeOfOpDropElements() == 0)
-                    {
-                        fLongElement=true;                    
-                    }
-                    else
-                    {
-                        return set_error(serror, SCRIPT_ERR_PUSH_SIZE);
-                    }
-                }
-                else
-                {
-                    fLongElement=false;                
-                }
-            }
-/* MCHN END */            
+            
             // Note how OP_RESERVED does not count towards the opcode limit.
             if (opcode > OP_16 && ++nOpCount > 201)
                 return set_error(serror, SCRIPT_ERR_OP_COUNT);
@@ -837,6 +800,10 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
                     }
 /* MCHN START */                    
                     bool cannot_send=true;
+                    if(flags & SCRIPT_VERIFY_SKIP_SEND_PERMISSION_CHECK)
+                    {
+                        cannot_send=false;
+                    }
 //                    bool fSuccess = checker.CheckSig(vchSig, vchPubKey, scriptCode);
                     bool fSuccess = checker.CheckSig(vchSig, vchPubKey, scriptCode, cannot_send);
                     fSuccess &= !cannot_send;
@@ -881,7 +848,7 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
                     i += nSigsCount;
                     if ((int)stack.size() < i)
                         return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
-
+                    
                     // Subset of script starting at the most recent codeseparator
                     CScript scriptCode(pbegincodehash, pend);
 
@@ -895,6 +862,10 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
 /* MCHN START */                    
                     bool cannot_send=true;
                     if(flags & SCRIPT_VERIFY_SKIP_SEND_PERMISSION_CHECK)
+                    {
+                        cannot_send=false;
+                    }
+                    if(mc_gState->m_NetworkParams->IsProtocolMultichain() == 0)
                     {
                         cannot_send=false;
                     }
@@ -1136,12 +1107,12 @@ bool TransactionSignatureChecker::CheckSig(const vector<unsigned char>& vchSigIn
 /* MCHN START */
     if(CheckSendPermission)
     {
-        
         if(mc_gState->m_NetworkParams->IsProtocolMultichain())
         {
-            const unsigned char *pubkey_hash=(unsigned char *)Hash160(vchPubKey.begin(),vchPubKey.end()).begin();
-
-            if(mc_gState->m_Permissions->CanSend(NULL,pubkey_hash))
+//            const unsigned char *pubkey_hash=(unsigned char *)Hash160(vchPubKey.begin(),vchPubKey.end()).begin();
+//            if(mc_gState->m_Permissions->CanSend(NULL,pubkey_hash))
+            uint160 hash=Hash160(vchPubKey.begin(),vchPubKey.end());
+            if(mc_gState->m_Permissions->CanSend(NULL,&hash))
             {
                 CheckSendPermission=false;                    
             }                                    
@@ -1179,14 +1150,11 @@ bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, unsigne
 //        return set_error(serror, SCRIPT_ERR_EVAL_FALSE);
 /* MCHN START */
         
-    if(mc_gState->m_Features->Streams())
+    if(!scriptSig.HasSmallIntegerInTheBeginning())
     {
-        if(!scriptSig.HasSmallIntegerInTheBeginning())
+        if(stack.size() != 1)
         {
-            if(stack.size() != 1)
-            {
-                return set_error(serror, SCRIPT_ERR_EVAL_FALSE);                    
-            }
+            return set_error(serror, SCRIPT_ERR_EVAL_FALSE);                    
         }
     }
 /* MCHN END */
@@ -1201,17 +1169,17 @@ bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, unsigne
         unsigned int p2shflags=flags;
         CTxDestination addressRet;
 
-        if(mc_gState->m_Features->Streams())
+        if(!scriptSig.HasSmallIntegerInTheBeginning())
         {
-            if(!scriptSig.HasSmallIntegerInTheBeginning())
-            {
-                return set_error(serror, SCRIPT_ERR_EVAL_FALSE);                    
-            }
-            if(!ExtractDestination(scriptPubKey, addressRet))
-            {
-                return set_error(serror, SCRIPT_ERR_VERIFY);
-            }
+            return set_error(serror, SCRIPT_ERR_EVAL_FALSE);                    
+        }
+        if(!ExtractDestination(scriptPubKey, addressRet))
+        {
+            return set_error(serror, SCRIPT_ERR_VERIFY);
+        }
 
+        if( (p2shflags & SCRIPT_VERIFY_SKIP_SEND_PERMISSION_CHECK) == 0)
+        {
             CScriptID *lpScriptID=boost::get<CScriptID> (&addressRet);
             if(lpScriptID)
             {

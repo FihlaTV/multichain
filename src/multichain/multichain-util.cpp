@@ -1,8 +1,9 @@
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "multichain/multichain.h"
 #include "chainparams/globals.h"
+#include "utils/util.h"
 
 int main(int argc, char* argv[])
 {
@@ -17,10 +18,14 @@ int main(int argc, char* argv[])
     mc_MultichainParams* paramsOld;
     mc_gState=new mc_State;
      
-    mc_gState->m_Params->Parse(argc, argv);
+    mc_gState->m_Params->Parse(argc, argv, MC_ETP_UTIL);
+    mc_CheckDataDirInConfFile();
+
     mc_gState->m_Params->ReadConfig(NULL);
     
-    printf("MultiChain utilities %s\n\n",mc_gState->GetFullVersion());
+    mc_ExpandDataDirParam();
+    
+    printf("\nMultiChain %s Utilities (latest protocol %d)\n\n",mc_BuildDescription(mc_gState->GetNumericVersion()).c_str(),mc_gState->GetProtocolVersion());
              
     err=MC_ERR_OPERATION_NOT_SUPPORTED;
      
@@ -38,13 +43,13 @@ int main(int argc, char* argv[])
                 if(mc_gState->m_Params->m_NumArguments>2)
                 {                    
                     v=atoi(mc_gState->m_Params->m_Arguments[2]);
-                    if( (v>=10002) && (v<=version) )
+                    if(mc_gState->IsSupported(v))
                     {
                         version=v;                        
                     }
                     else
                     {
-                        fprintf(stderr,"ERROR: Invalid value for protocol version. Valid range: 10002 - %d\n",mc_gState->GetProtocolVersion());   
+                        fprintf(stderr,"ERROR: Invalid value for protocol version. Valid range: %s\n",mc_SupportedProtocols().c_str());   
                         err=MC_ERR_INVALID_PARAMETER_VALUE;
                     }
                 }

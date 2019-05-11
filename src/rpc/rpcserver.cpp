@@ -1,10 +1,11 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "rpc/rpcserver.h"
+#include "rpc/rpcasio.h"
 
 #include "structs/base58.h"
 #include "core/init.h"
@@ -47,6 +48,51 @@ static boost::thread_group* rpc_worker_group = NULL;
 static boost::asio::io_service::work *rpc_dummy_work = NULL;
 static std::vector<CSubNet> rpc_allow_subnets; //!< List of subnets to allow RPC connections from
 static std::vector< boost::shared_ptr<ip::tcp::acceptor> > rpc_acceptors;
+
+//! Convert boost::asio address to CNetAddr
+extern CNetAddr BoostAsioToCNetAddr(boost::asio::ip::address address);
+
+
+string JSONRPCRequestForLog(const string& strMethod, const Array& params, const Value& id)
+{
+    Object request;
+    request.push_back(Pair("method", strMethod));
+    map<string, int>::iterator it = mapLogParamCounts.find(strMethod);
+    if (it != mapLogParamCounts.end())
+    {
+        Array visible_params;
+        if(it->second != 0)
+        {
+            if(strMethod == "signrawtransaction")
+            {
+                visible_params=params;
+                if (visible_params.size() > 2 && visible_params[2].type() != null_type) 
+                {
+                    visible_params[2]="[<PRIVATE KEYS>]";
+                }
+            }
+        }
+        request.push_back(Pair("params", visible_params));
+    }
+    else
+    {
+        request.push_back(Pair("params", params));
+    }
+    request.push_back(Pair("id", id));
+/*    
+    request.push_back(Pair("chain_name", string(mc_gState->m_Params->NetworkName())));
+ */ 
+    return write_string(Value(request), false);// + "\n";
+}
+
+string JSONRPCMethodIDForLog(const string& strMethod, const Value& id)
+{
+    Object request;
+    request.push_back(Pair("method", strMethod));
+    request.push_back(Pair("id", id));
+    return write_string(Value(request), false);// + "\n";
+}
+
 
 void RPCTypeCheck(const Array& params,
                   const list<Value_type>& typesExpected,
@@ -101,21 +147,21 @@ CAmount AmountFromValue(const Value& value)
     {
         if(dAmount != 0)
         {
-            throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount");            
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid amount");            
         }
     }
     else
     {
         if (dAmount < 0.0 || dAmount > (double)MAX_MONEY/(double)COIN)                                  // MCHN - was <=
-            throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount");        
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid amount");        
     }
     
 //    if (dAmount < 0.0 || dAmount > 21000000.0)                                  // MCHN - was <=
-//        throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount");
+//        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid amount");
 /* MCHN END */    
     CAmount nAmount = roundint64(dAmount * COIN);
     if (!MoneyRange(nAmount))
-        throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid amount");
     return nAmount;
 }
 
@@ -137,7 +183,9 @@ uint256 ParseHashV(const Value& v, string strName)
         strHex = v.get_str();
     if (!IsHex(strHex)) // Note: IsHex("") is false
         throw JSONRPCError(RPC_INVALID_PARAMETER, strName+" must be hexadecimal string (not '"+strHex+"')");
-    uint256 result;
+    if (64 != strHex.length())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be of length %d (not %d)", strName, 64, strHex.length()));
+     uint256 result;
     result.SetHex(strHex);
     return result;
 }
@@ -203,7 +251,10 @@ string CRPCTable::help(string strCommand) const
             }
             catch (std::exception& e)
             {
-                strHelp = string(e.what());
+                if(strCommand != "")
+                {
+                    strHelp = string(e.what());
+                }
             }
         }
         else
@@ -276,7 +327,18 @@ Value help(const Array& params, bool fHelp)
     string strCommand;
     if (params.size() > 0)
         strCommand = params[0].get_str();
-
+    
+    if(strCommand.size())
+    {
+        if(setAllowedWhenLimited.size())
+        {
+            if( setAllowedWhenLimited.count(strCommand) == 0 )
+            {
+                throw JSONRPCError(RPC_NOT_ALLOWED, "Method not allowed with current setting of -rpcallowmethod runtime parameter");                
+            }        
+        }
+    }
+    
     return tableRPC.help(strCommand);
 }
 
@@ -295,7 +357,7 @@ Value stop(const Array& params, bool fHelp)
 
 string AllowedPausedServices()
 {
-    string ret="incoming,mining";
+    string ret="incoming,mining,offchain";
     
     return ret;
 }
@@ -319,11 +381,14 @@ uint32_t GetPausedServices(const char *str)
         c=*ptr;
         if( (c == ',') || (c ==0x00))
         {
-            if(ptr > start)
+            if(ptr > start+4)
             {
                 type=0;
-                if(memcmp(start,"incoming",  ptr-start) == 0)type = MC_NPS_INCOMING;
-                if(memcmp(start,"mining",    ptr-start) == 0)type = MC_NPS_MINING;
+                if(memcmp(start,"incoming",    ptr-start) == 0)type = MC_NPS_INCOMING;
+                if(memcmp(start,"mining",      ptr-start) == 0)type = MC_NPS_MINING;
+                if(memcmp(start,"reaccepting", ptr-start) == 0)type = MC_NPS_REACCEPT;
+                if(memcmp(start,"offchain",    ptr-start) == 0)type = MC_NPS_OFFCHAIN;
+                if(memcmp(start,"chunks",      ptr-start) == 0)type = MC_NPS_CHUNKS;
                 
                 if(type == 0)
                 {
@@ -352,7 +417,7 @@ Value pausecmd(const Array& params, bool fHelp)
     }
     
     if(type == 0)
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid task");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid task");
     
     LOCK(cs_main);
     
@@ -375,11 +440,16 @@ Value resumecmd(const Array& params, bool fHelp)
     }
     
     if(type == 0)
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid task");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid task");
     
     LOCK(cs_main);
     
     mc_gState->m_NodePausedState &= (MC_NPS_ALL ^ type);
+    
+    if( type & MC_NPS_REACCEPT )
+    {
+        pwalletMain->ReacceptWalletTransactions();                                                                                            
+    }
     
     LogPrintf("Node paused state is set to %08X\n",mc_gState->m_NodePausedState);
     
@@ -388,248 +458,25 @@ Value resumecmd(const Array& params, bool fHelp)
 
 /* END */
 
-/* MCHN START */
-static const CRPCCommand vRPCWalletReadCommands[] =
-{ //  category              name                      actor (function)         okSafeMode threadSafe reqWallet
-  //  --------------------- ------------------------  -----------------------  ---------- ---------- ---------
-    { "wallet",             "getbalance",             &getbalance,             false,     false,      true },
-    { "wallet",             "getreceivedbyaccount",   &getreceivedbyaccount,   false,     false,      true },
-    { "wallet",             "getreceivedbyaddress",   &getreceivedbyaddress,   false,     false,      true },
-    { "wallet",             "gettransaction",         &gettransaction,         false,     false,      true },
-    { "wallet",             "getunconfirmedbalance",  &getunconfirmedbalance,  false,     false,      true },
-    { "wallet",             "getwalletinfo",          &getwalletinfo,          false,     false,      true },
-    { "wallet",             "listlockunspent",        &listlockunspent,        false,     false,      true },
-    { "wallet",             "listreceivedbyaccount",  &listreceivedbyaccount,  false,     false,      true },
-    { "wallet",             "listreceivedbyaddress",  &listreceivedbyaddress,  false,     false,      true },
-    { "wallet",             "listsinceblock",         &listsinceblock,         false,     false,      true },
-    { "wallet",             "listtransactions",       &listtransactions,       false,     false,      true },
-    { "wallet",             "listunspent",            &listunspent,            false,     false,      true },
-    { "wallet",             "getassetbalances",       &getassetbalances,       false,     false,      true },
-    { "wallet",             "gettotalbalances",       &gettotalbalances,       false,     false,      true },
-    
-    { "wallet",             "getmultibalances",       &getmultibalances,       false,     false,      true },
-    { "wallet",             "getaddressbalances",     &getaddressbalances,     false,     false,      true },
-    
-    { "wallet",             "listwallettransactions", &listwallettransactions, false,     false,      true },
-    { "wallet",             "listaddresstransactions",&listaddresstransactions,false,     false,      true },
-    { "wallet",             "getwallettransaction",   &getwallettransaction,   false,     false,      true },
-    { "wallet",             "getaddresstransaction",  &getaddresstransaction,  false,     false,      true },
-};
-
-/* MCHN END */
-
-/**
- * Call Table
- */
-static const CRPCCommand vRPCCommands[] =
-{ //  category              name                      actor (function)         okSafeMode threadSafe reqWallet
-  //  --------------------- ------------------------  -----------------------  ---------- ---------- ---------
-    /* Overall control/query calls */
-    { "control",            "getinfo",                &getinfo,                true,      false,      false }, /* uses wallet if enabled */
-    { "control",            "help",                   &help,                   true,      true,       false },
-    { "control",            "stop",                   &stop,                   true,      true,       false },
-/* MCHN START */    
-    { "control",            "pause",                  &pausecmd,               true,      false,      false },
-    { "control",            "resume",                 &resumecmd,              true,      false,      false },
-    { "control",            "clearmempool",           &clearmempool,           true,      false,      false },
-    { "control",            "setlastblock",           &setlastblock,           true,      false,      false },
-    { "control",            "getblockchainparams",    &getblockchainparams,    true,      false,      false }, 
-/* MCHN END */    
-
-    /* P2P networking */
-    { "network",            "getnetworkinfo",         &getnetworkinfo,         true,      false,      false },
-    { "network",            "addnode",                &addnode,                true,      true,       false },
-    { "network",            "getaddednodeinfo",       &getaddednodeinfo,       true,      true,       false },
-    { "network",            "getconnectioncount",     &getconnectioncount,     true,      false,      false },
-    { "network",            "getnettotals",           &getnettotals,           true,      true,       false },
-    { "network",            "getpeerinfo",            &getpeerinfo,            true,      false,      false },
-    { "network",            "ping",                   &ping,                   true,      false,      false },
-
-    /* Block chain and UTXO */
-    { "blockchain",         "getblockchaininfo",      &getblockchaininfo,      true,      false,      false },
-    { "blockchain",         "getbestblockhash",       &getbestblockhash,       true,      false,      false },
-    { "blockchain",         "getblockcount",          &getblockcount,          true,      false,      false },
-    { "blockchain",         "getblock",               &getblock,               true,      false,      false },
-    { "blockchain",         "getblockhash",           &getblockhash,           true,      false,      false },
-    { "blockchain",         "getchaintips",           &getchaintips,           true,      false,      false },
-    { "blockchain",         "getdifficulty",          &getdifficulty,          true,      false,      false },
-    { "blockchain",         "getmempoolinfo",         &getmempoolinfo,         true,      true,       false },
-    { "blockchain",         "getrawmempool",          &getrawmempool,          true,      false,      false },
-    { "blockchain",         "gettxout",               &gettxout,               true,      false,      false },
-    { "blockchain",         "gettxoutsetinfo",        &gettxoutsetinfo,        true,      false,      false },
-    { "blockchain",         "verifychain",            &verifychain,            true,      false,      false },
-    { "blockchain",         "invalidateblock",        &invalidateblock,        true,      true,       false },
-    { "blockchain",         "reconsiderblock",        &reconsiderblock,        true,      true,       false },
-
-/* MCHN START */    
-    { "blockchain",         "listassets",             &listassets,             true,      false,      false },
-    { "blockchain",         "listpermissions",        &listpermissions,        true,      false,      false },
-    { "blockchain",         "liststreams",            &liststreams,            true,      false,      false },
-/* MCHN END */    
-    
-    /* Mining */
-    { "mining",             "getblocktemplate",       &getblocktemplate,       true,      false,      false },
-    { "mining",             "getmininginfo",          &getmininginfo,          true,      false,      false },
-    { "mining",             "getnetworkhashps",       &getnetworkhashps,       true,      false,      false },
-    { "mining",             "prioritisetransaction",  &prioritisetransaction,  true,      false,      false },
-    { "mining",             "submitblock",            &submitblock,            true,      true,       false },
-
-#ifdef ENABLE_WALLET
-    /* Coin generation */
-    { "generating",         "getgenerate",            &getgenerate,            true,      false,      false },
-    { "generating",         "gethashespersec",        &gethashespersec,        true,      false,      false },
-    { "generating",         "setgenerate",            &setgenerate,            true,      true,       false },
-#endif
-
-    /* Raw transactions */
-    { "rawtransactions",    "createrawtransaction",   &createrawtransaction,   true,      false,      false },
-    { "rawtransactions",    "decoderawtransaction",   &decoderawtransaction,   true,      false,      false },
-    { "rawtransactions",    "decodescript",           &decodescript,           true,      false,      false },
-    { "rawtransactions",    "getrawtransaction",      &getrawtransaction,      true,      false,      false },
-    { "rawtransactions",    "sendrawtransaction",     &sendrawtransaction,     false,     false,      false },
-    { "rawtransactions",    "signrawtransaction",     &signrawtransaction,     false,     false,      false }, /* uses wallet if enabled */
-/* MCHN START */    
-    { "rawtransactions",    "appendrawchange",        &appendrawchange,        false,     false,      true },
-    { "hidden",             "appendrawmetadata",      &appendrawmetadata,      false,     false,      true },
-    { "rawtransactions",    "appendrawdata",          &appendrawmetadata,      false,     false,      true },
-/* MCHN END */    
-
-    /* Utility functions */
-    { "util",               "createkeypairs",         &createkeypairs,         true,      true ,      false },
-    { "util",               "createmultisig",         &createmultisig,         true,      true ,      false },
-    { "util",               "validateaddress",        &validateaddress,        true,      false,      false }, /* uses wallet if enabled */
-    { "util",               "verifymessage",          &verifymessage,          true,      false,      false },
-    { "util",               "estimatefee",            &estimatefee,            true,      true,       false },
-    { "util",               "estimatepriority",       &estimatepriority,       true,      true,       false },
-
-    /* Not shown in help */
-    { "hidden",             "invalidateblock",        &invalidateblock,        true,      true,       false },
-    { "hidden",             "reconsiderblock",        &reconsiderblock,        true,      true,       false },
-    { "hidden",             "setmocktime",            &setmocktime,            true,      false,      false },
-
-#ifdef ENABLE_WALLET
-    /* Wallet */
-    { "wallet",             "addmultisigaddress",     &addmultisigaddress,     true,      false,      true },
-    { "wallet",             "backupwallet",           &backupwallet,           true,      false,      true },
-    { "wallet",             "dumpprivkey",            &dumpprivkey,            true,      false,      true },
-    { "wallet",             "dumpwallet",             &dumpwallet,             true,      false,      true },
-    { "wallet",             "encryptwallet",          &encryptwallet,          true,      false,      true },
-    { "wallet",             "getaccountaddress",      &getaccountaddress,      true,      false,      true },
-    { "wallet",             "getaccount",             &getaccount,             true,      false,      true },
-    { "wallet",             "getaddressesbyaccount",  &getaddressesbyaccount,  true,      false,      true },
-    { "wallet",             "getbalance",             &getbalance,             false,     false,      true },
-    { "wallet",             "getnewaddress",          &getnewaddress,          true,      false,      true },
-    { "wallet",             "getrawchangeaddress",    &getrawchangeaddress,    true,      false,      true },
-    { "wallet",             "getreceivedbyaccount",   &getreceivedbyaccount,   false,     false,      true },
-    { "wallet",             "getreceivedbyaddress",   &getreceivedbyaddress,   false,     false,      true },
-    { "wallet",             "gettransaction",         &gettransaction,         false,     false,      true },
-    { "wallet",             "getunconfirmedbalance",  &getunconfirmedbalance,  false,     false,      true },
-    { "wallet",             "getwalletinfo",          &getwalletinfo,          false,     false,      true },
-    { "wallet",             "importprivkey",          &importprivkey,          true,      false,      true },
-    { "wallet",             "importwallet",           &importwallet,           true,      false,      true },
-    { "wallet",             "importaddress",          &importaddress,          true,      false,      true },
-    { "wallet",             "keypoolrefill",          &keypoolrefill,          true,      false,      true },
-    { "wallet",             "listaccounts",           &listaccounts,           false,     false,      true },
-    { "wallet",             "listaddressgroupings",   &listaddressgroupings,   false,     false,      true },
-    { "wallet",             "listlockunspent",        &listlockunspent,        false,     false,      true },
-    { "wallet",             "listreceivedbyaccount",  &listreceivedbyaccount,  false,     false,      true },
-    { "wallet",             "listreceivedbyaddress",  &listreceivedbyaddress,  false,     false,      true },
-    { "wallet",             "listsinceblock",         &listsinceblock,         false,     false,      true },
-    { "wallet",             "listtransactions",       &listtransactions,       false,     false,      true },
-    { "wallet",             "listunspent",            &listunspent,            false,     false,      true },
-    { "wallet",             "lockunspent",            &lockunspent,            true,      false,      true },
-    { "wallet",             "move",                   &movecmd,                false,     false,      true },
-//    { "wallet",             "sendfrom",               &sendfrom,               false,     false,      true },
-    { "wallet",             "sendfromaccount",        &sendfrom,               false,     false,      true },
-    { "wallet",             "sendmany",               &sendmany,               false,     false,      true },
-    { "hidden",             "sendtoaddress",          &sendtoaddress,          false,     false,      true },
-    { "wallet",             "send",                   &sendtoaddress,          false,     false,      true },
-/* MCHN START */    
-    { "wallet",             "getaddresses",           &getaddresses,           true,      false,      true },
-    { "wallet",             "combineunspent",         &combineunspent,         false,     false,      true }, 
-    { "wallet",             "grant",                  &grantcmd,               false,     false,      true }, 
-    { "wallet",             "revoke",                 &revokecmd,              false,     false,      true },
-    { "wallet",             "issue",                  &issuecmd,               false,     false,      true },
-    { "wallet",             "issuemore",              &issuemorecmd,           false,     false,      true },
-    { "wallet",             "getassetbalances",       &getassetbalances,       false,     false,      true },
-    { "wallet",             "gettotalbalances",       &gettotalbalances,       false,     false,      true },
-    { "hidden",             "sendassettoaddress",     &sendassettoaddress,     false,     false,      true },
-    { "wallet",             "sendasset",              &sendassettoaddress,     false,     false,      true },
-    { "wallet",             "preparelockunspent",     &preparelockunspent,     false,     false,      true },
-    { "wallet",             "createrawexchange",      &createrawexchange,      false,     false,      true },
-    { "wallet",             "appendrawexchange",      &appendrawexchange,      false,     false,      true },
-    { "wallet",             "completeexchange",       &completeexchange,       false,     false,      true },
-    { "wallet",             "decoderawexchange",      &decoderawexchange,      false,     false,      true },
-    
-    { "wallet",             "grantfrom",              &grantfromcmd,           false,     false,      true }, 
-    { "wallet",             "revokefrom",             &revokefromcmd,          false,     false,      true },
-    { "wallet",             "issuefrom",              &issuefromcmd,           false,     false,      true },
-    { "wallet",             "issuemorefrom",          &issuemorefromcmd,       false,     false,      true },
-    { "wallet",             "preparelockunspentfrom", &preparelockunspentfrom, false,     false,      true },
-    { "wallet",             "sendassetfrom",          &sendassetfrom,          false,     false,      true },
-    { "hidden",             "sendfromaddress",        &sendfromaddress,        false,     false,      true },
-    { "wallet",             "sendfrom",               &sendfromaddress,        false,     false,      true },
-    { "wallet",             "getmultibalances",       &getmultibalances,       false,     false,      true },
-    { "wallet",             "getaddressbalances",     &getaddressbalances,     false,     false,      true },
-    { "wallet",             "disablerawtransaction",  &disablerawtransaction,  false,     false,      true },
-    { "hidden",             "sendwithmetadata",       &sendwithmetadata,       false,     false,      true },
-    { "wallet",             "sendwithdata",           &sendwithmetadata,       false,     false,      true },
-    { "hidden",             "sendwithmetadatafrom",   &sendwithmetadatafrom,   false,     false,      true },
-    { "wallet",             "sendwithdatafrom",       &sendwithmetadatafrom,   false,     false,      true },
-    { "hidden",             "grantwithmetadata",      &grantwithmetadata,      false,     false,      true },
-    { "wallet",             "grantwithdata",          &grantwithmetadata,      false,     false,      true },
-    { "hidden",             "grantwithmetadatafrom",  &grantwithmetadatafrom,  false,     false,      true },
-    { "wallet",             "grantwithdatafrom",      &grantwithmetadatafrom,  false,     false,      true },
-    { "wallet",             "createrawsendfrom",      &createrawsendfrom,      false,     false,      true },
-    
-    { "wallet",             "listaddresses",          &listaddresses,          false,     false,      true },
-    { "wallet",             "listwallettransactions", &listwallettransactions, false,     false,      true },
-    { "wallet",             "listaddresstransactions",&listaddresstransactions,false,     false,      true },
-    { "wallet",             "getwallettransaction",   &getwallettransaction,   false,     false,      true },
-    { "wallet",             "getaddresstransaction",  &getaddresstransaction,  false,     false,      true },
-    { "wallet",             "resendwallettransactions",&resendwallettransactions,  false,     false,      true },
-    
-    { "wallet",             "create",                 &createcmd,                false,     false,      true },
-    { "wallet",             "createfrom",             &createfromcmd,            false,     false,      true },
-    { "wallet",             "publish",                &publish,                false,     false,      true },
-    { "wallet",             "publishfrom",            &publishfrom,            false,     false,      true },
-    { "wallet",             "subscribe",              &subscribe,              false,     false,      true },
-    { "wallet",             "unsubscribe",            &unsubscribe,            false,     false,      true },
-    { "wallet",             "listassettransactions",  &listassettransactions,         false,     false,      true },
-    { "wallet",             "getassettransaction",    &getassettransaction,         false,     false,      true },
-    { "wallet",             "getstreamitem",          &getstreamitem,         false,     false,      true },
-    { "wallet",             "liststreamitems",        &liststreamitems,         false,     false,      true },
-    { "wallet",             "liststreamkeyitems",     &liststreamkeyitems,      false,     false,      true },
-    { "wallet",             "liststreampublisheritems",&liststreampublisheritems,false,     false,      true },
-    { "wallet",             "liststreamkeys",         &liststreamkeys,        false,     false,      true },
-    { "wallet",             "liststreampublishers",   &liststreampublishers,  false,     false,      true },
-    { "wallet",             "gettxoutdata",           &gettxoutdata,           false,     false,      true },
-    
-/* MCHN END */    
-    { "wallet",             "setaccount",             &setaccount,             true,      false,      true },
-    { "wallet",             "settxfee",               &settxfee,               true,      false,      true },
-    { "wallet",             "signmessage",            &signmessage,            true,      false,      true },
-    { "wallet",             "walletlock",             &walletlock,             true,      false,      true },
-    { "wallet",             "walletpassphrasechange", &walletpassphrasechange, true,      false,      true },
-    { "wallet",             "walletpassphrase",       &walletpassphrase,       true,      false,      true },
-#endif // ENABLE_WALLET
-};
-
 CRPCTable::CRPCTable()
 {
+}
+
+void CRPCTable::initialize()
+{
     unsigned int vcidx;
-    for (vcidx = 0; vcidx < (sizeof(vRPCCommands) / sizeof(vRPCCommands[0])); vcidx++)
+    for (vcidx = 0; vcidx < vStaticRPCCommands.size(); vcidx++)
     {
         const CRPCCommand *pcmd;
 
-        pcmd = &vRPCCommands[vcidx];
+        pcmd = &vStaticRPCCommands[vcidx];
         mapCommands[pcmd->name] = pcmd;
     }
-    for (vcidx = 0; vcidx < (sizeof(vRPCWalletReadCommands) / sizeof(vRPCWalletReadCommands[0])); vcidx++)
+    for (vcidx = 0; vcidx < vStaticRPCWalletReadCommands.size(); vcidx++)
     {
         const CRPCCommand *pcmd;
 
-        pcmd = &vRPCWalletReadCommands[vcidx];
+        pcmd = &vStaticRPCWalletReadCommands[vcidx];
         mapWalletReadCommands[pcmd->name] = pcmd;
     }
 }
@@ -810,8 +657,31 @@ static ip::tcp::endpoint ParseEndpoint(const std::string &strEndpoint, int defau
     return ip::tcp::endpoint(asio::ip::address::from_string(addr), port);
 }
 
-void StartRPCThreads()
+void mc_InitRPCListIfLimited()
 {
+    if (mapArgs.count("-rpcallowmethod")) 
+    {
+        setAllowedWhenLimited.insert("help");
+        BOOST_FOREACH(const std::string& methods, mapMultiArgs["-rpcallowmethod"]) 
+        {
+            stringstream ss(methods); 
+            string tok;
+            while(getline(ss, tok, ',')) 
+            {
+                setAllowedWhenLimited.insert(tok);    
+            }
+        }
+    }
+}
+
+void StartRPCThreads(string& strError)
+{
+    mc_InitRPCList(vStaticRPCCommands,vStaticRPCWalletReadCommands);
+    mc_InitRPCListIfLimited();
+    tableRPC.initialize();
+
+    strError="";
+    
     rpc_allow_subnets.clear();
     rpc_allow_subnets.push_back(CSubNet("127.0.0.0/8")); // always allow IPv4 local subnet
     rpc_allow_subnets.push_back(CSubNet("::1")); // always allow IPv6 localhost
@@ -835,7 +705,7 @@ void StartRPCThreads()
     std::string strAllowed;
     BOOST_FOREACH(const CSubNet &subnet, rpc_allow_subnets)
         strAllowed += subnet.ToString() + " ";
-    LogPrint("rpc", "Allowing RPC connections from: %s\n", strAllowed);
+    if(fDebug)LogPrint("rpc", "Allowing RPC connections from: %s\n", strAllowed);
 
     strRPCUserColonPass = mapArgs["-rpcuser"] + ":" + mapArgs["-rpcpassword"];
     if (((mapArgs["-rpcpassword"] == "") ||
@@ -874,12 +744,20 @@ void StartRPCThreads()
         filesystem::path pathCertFile(GetArg("-rpcsslcertificatechainfile", "server.cert"));
         if (!pathCertFile.is_complete()) pathCertFile = filesystem::path(GetDataDir()) / pathCertFile;
         if (filesystem::exists(pathCertFile)) rpc_ssl_context->use_certificate_chain_file(pathCertFile.string());
-        else LogPrintf("ThreadRPCServer ERROR: missing server certificate file %s\n", pathCertFile.string());
+        else
+        {
+            LogPrintf("ThreadRPCServer ERROR: missing server certificate file %s\n", pathCertFile.string());
+            strError += strprintf("Missing server certificate file %s\n", pathCertFile.string().c_str());
+        }
 
         filesystem::path pathPKFile(GetArg("-rpcsslprivatekeyfile", "server.pem"));
         if (!pathPKFile.is_complete()) pathPKFile = filesystem::path(GetDataDir()) / pathPKFile;
         if (filesystem::exists(pathPKFile)) rpc_ssl_context->use_private_key_file(pathPKFile.string(), ssl::context::pem);
-        else LogPrintf("ThreadRPCServer ERROR: missing server private key file %s\n", pathPKFile.string());
+        else
+        {
+            LogPrintf("ThreadRPCServer ERROR: missing server private key file %s\n", pathPKFile.string());
+            strError += strprintf("Missing server private key file %s\n", pathPKFile.string().c_str());
+        }
 
         string strCiphers = GetArg("-rpcsslciphers", "TLSv1.2+HIGH:TLSv1+HIGH:!SSLv2:!aNULL:!eNULL:!3DES:@STRENGTH");
         SSL_CTX_set_cipher_list(rpc_ssl_context->impl(), strCiphers.c_str());
@@ -964,10 +842,27 @@ void StartRPCThreads()
     }
 
     rpc_worker_group = new boost::thread_group();
+    
+
+#ifdef MAC_OSX
+    boost::thread::attributes attrs;
+    attrs.set_stack_size(8*1024*1024);
+    
+    for (int i = 0; i < GetArg("-rpcthreads", 4); i++)
+    {
+        boost::thread *lpThread=new thread(attrs,boost::bind(&asio::io_service::run, rpc_io_service));
+        rpc_worker_group->add_thread(lpThread);
+    }    
+#else    
     for (int i = 0; i < GetArg("-rpcthreads", 4); i++)
         rpc_worker_group->create_thread(boost::bind(&asio::io_service::run, rpc_io_service));
-    
+#endif
     fRPCRunning = true;
+    
+    if(strError.size())
+    {
+        strError += "Node may be unable to process API requests.\n";
+    }
 }
 
 void StartDummyRPCThread()
@@ -1093,7 +988,7 @@ void JSONRequest::parse(const Value& valRequest)
         throw JSONRPCError(RPC_INVALID_REQUEST, "Method must be a string");
     strMethod = valMethod.get_str();
     if (strMethod != "getblocktemplate")
-        LogPrint("rpc", "ThreadRPCServer method=%s\n", strMethod);
+        if(fDebug)LogPrint("rpc", "ThreadRPCServer method=%s\n", SanitizeString(strMethod));
 
 /* MCHN START */    
     Value valChainName = find_value(request, "chain_name");
@@ -1127,14 +1022,14 @@ static Object JSONRPCExecOne(const Value& req)
     try {
         jreq.parse(req);
 
-        Value result = tableRPC.execute(jreq.strMethod, jreq.params);
+        Value result = tableRPC.execute(jreq.strMethod, jreq.params,jreq.id);
         rpc_result = JSONRPCReplyObj(result, Value::null, jreq.id);
     }
     catch (Object& objError)
     {
 /* MCHN START */    
         mc_gState->m_WalletMode=wallet_mode;
-        LogPrint("mcapi","mcapi: API request failure\n");        
+        if(fDebug)LogPrint("mcapi","mcapi: API request failure A: %s\n",JSONRPCMethodIDForLog(jreq.strMethod,jreq.id).c_str());        
 /* MCHN END */    
         rpc_result = JSONRPCReplyObj(Value::null, objError, jreq.id);
     }
@@ -1142,7 +1037,7 @@ static Object JSONRPCExecOne(const Value& req)
     {
 /* MCHN START */    
         mc_gState->m_WalletMode=wallet_mode;
-        LogPrint("mcapi","mcapi: API request failure\n");        
+        if(fDebug)LogPrint("mcapi","mcapi: API request failure B: %s\n",JSONRPCMethodIDForLog(jreq.strMethod,jreq.id).c_str());        
 /* MCHN END */    
         rpc_result = JSONRPCReplyObj(Value::null,
                                      JSONRPCError(RPC_PARSE_ERROR, e.what()), jreq.id);
@@ -1187,7 +1082,7 @@ static bool HTTPReq_JSONRPC(AcceptedConnection *conn,
     JSONRequest jreq;
 /* MCHN START */    
     uint32_t wallet_mode=mc_gState->m_WalletMode;
-    LogPrint("mcapi","mcapi: API request from %s\n",conn->peer_address_to_string().c_str());
+    if(fDebug)LogPrint("mcapi","mcapi: API request from %s\n",conn->peer_address_to_string().c_str());
 /* MCHN END */    
     try
     {
@@ -1209,7 +1104,7 @@ static bool HTTPReq_JSONRPC(AcceptedConnection *conn,
         if (valRequest.type() == obj_type) {
             jreq.parse(valRequest);
 
-            Value result = tableRPC.execute(jreq.strMethod, jreq.params);
+            Value result = tableRPC.execute(jreq.strMethod, jreq.params,jreq.id);
 
             // Send reply
             strReply = JSONRPCReply(result, Value::null, jreq.id);
@@ -1226,7 +1121,9 @@ static bool HTTPReq_JSONRPC(AcceptedConnection *conn,
     {
 /* MCHN START */    
         mc_gState->m_WalletMode=wallet_mode;
-        LogPrint("mcapi","mcapi: API request failure\n");        
+        if(fDebug)LogPrint("mcapi","mcapi: API request failure: %s, code: %d\n",JSONRPCMethodIDForLog(jreq.strMethod,jreq.id).c_str(),find_value(objError, "code").get_int());
+        
+//        if(fDebug)LogPrint("mcapi","mcapi: API request failure C\n");        
 /* MCHN END */    
         ErrorReply(conn->stream(), objError, jreq.id);
         return false;
@@ -1235,7 +1132,7 @@ static bool HTTPReq_JSONRPC(AcceptedConnection *conn,
     {
 /* MCHN START */    
         mc_gState->m_WalletMode=wallet_mode;
-        LogPrint("mcapi","mcapi: API request failure\n");        
+        if(fDebug)LogPrint("mcapi","mcapi: API request failure D: %s\n",JSONRPCMethodIDForLog(jreq.strMethod,jreq.id).c_str());        
 /* MCHN END */    
         ErrorReply(conn->stream(), JSONRPCError(RPC_PARSE_ERROR, e.what()), jreq.id);
         return false;
@@ -1260,7 +1157,7 @@ void ServiceConnection(AcceptedConnection *conn)
         ReadHTTPMessage(conn->stream(), mapHeaders, strRequest, nProto, MAX_SIZE);
 
         // HTTP Keep-Alive is false; close connection immediately
-        if ((mapHeaders["connection"] == "close") || (!GetBoolArg("-rpckeepalive", true)))
+        if ((mapHeaders["connection"] == "close") || (!GetBoolArg("-rpckeepalive", false)))
             fRun = false;
 
         // Process via JSON-RPC API
@@ -1280,17 +1177,51 @@ void ServiceConnection(AcceptedConnection *conn)
     }
 }
 
-json_spirit::Value CRPCTable::execute(const std::string &strMethod, const json_spirit::Array &params) const
+json_spirit::Value CRPCTable::execute(const std::string &strMethod, const json_spirit::Array &params, const Value& req_id) const
 {
     // Find method
     const CRPCCommand *pcmd = tableRPC[strMethod];
     if (!pcmd)
-        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found");
+    {
+        if( ((mc_gState->m_SessionFlags & MC_SSF_COLD) == 0) || (mapHelpStrings.count(strMethod) == 0) )
+        {
+            throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found");
+        }
+        else
+        {
+            throw JSONRPCError(RPC_NOT_SUPPORTED, "Method not available in cold version of MultiChain");            
+        }
+    }
 #ifdef ENABLE_WALLET
     if (pcmd->reqWallet && !pwalletMain)
         throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (disabled)");
 #endif
 
+//    if(mc_gState->m_ProtocolVersionToUpgrade > mc_gState->m_NetworkParams->ProtocolVersion())
+    if( (mc_gState->m_ProtocolVersionToUpgrade > 0) && (mc_gState->IsSupported(mc_gState->m_ProtocolVersionToUpgrade) == 0) )
+    {
+        if( setAllowedWhenWaitingForUpgrade.count(strMethod) == 0 )
+        {
+            throw JSONRPCError(RPC_UPGRADE_REQUIRED, strprintf("BlockChain was upgraded to protocol version %d, please upgrade MultiChain",mc_gState->m_ProtocolVersionToUpgrade));
+        }
+    }
+    
+    if(GetBoolArg("-offline",false))
+    {
+        if( setAllowedWhenOffline.count(strMethod) == 0 )
+        {
+            throw JSONRPCError(RPC_NOT_SUPPORTED, "Method not available with -offline runtime parameter");                
+        }        
+    }
+    
+    if(setAllowedWhenLimited.size())
+    {
+        if( setAllowedWhenLimited.count(strMethod) == 0 )
+        {
+            throw JSONRPCError(RPC_NOT_ALLOWED, "Method not allowed with current setting of -rpcallowmethod runtime parameter");                
+        }        
+    }
+    
     // Observe safe mode
     string strWarning = GetWarnings("rpc");
     if (strWarning != "" && !GetBoolArg("-disablesafemode", false) &&
@@ -1300,8 +1231,11 @@ json_spirit::Value CRPCTable::execute(const std::string &strMethod, const json_s
     try
     {
         // Execute
-        string strRequest = JSONRPCRequest(strMethod, params, 1);
-        LogPrint("mcapi","mcapi: API request: %s\n",strRequest.c_str());
+        if(fDebug)
+        {
+            string strRequest = JSONRPCRequestForLog(strMethod, params, req_id);
+            LogPrint("mcapi","mcapi: API request: %s\n",strRequest.c_str());
+        }
         
         Value result;
         {
@@ -1342,14 +1276,14 @@ json_spirit::Value CRPCTable::execute(const std::string &strMethod, const json_s
                             strResult=JSONRPCReply(result, Value::null, 1);       
                             if(strcmp(strResultNone.c_str(),strResult.c_str()))
                             {
-                                string strRequestBad = JSONRPCRequest(strMethod, params, 1);
-                                LogPrint("walletcompare","walletcompare: ERROR: Result mismatch on API request: %s\n",strRequestBad.c_str());
-                                LogPrint("walletcompare","walletcompare: %s\n",strResultNone.c_str());
-                                LogPrint("walletcompare","walletcompare: %s\n",strResult.c_str());
+                                string strRequestBad = JSONRPCRequestForLog(strMethod, params, req_id);
+                                if(fDebug)LogPrint("walletcompare","walletcompare: ERROR: Result mismatch on API request: %s\n",strRequestBad.c_str());
+                                if(fDebug)LogPrint("walletcompare","walletcompare: %s\n",strResultNone.c_str());
+                                if(fDebug)LogPrint("walletcompare","walletcompare: %s\n",strResult.c_str());
                             }
                             else
                             {
-                                LogPrint("walletcompare","walletcompare: match: %s \n",strMethod.c_str());                                
+                                if(fDebug)LogPrint("walletcompare","walletcompare: match: %s \n",strMethod.c_str());                                
                             }
                         }
                     }
@@ -1365,13 +1299,13 @@ json_spirit::Value CRPCTable::execute(const std::string &strMethod, const json_s
 #endif // !ENABLE_WALLET
         }
 /* MCHN START */        
-        LogPrint("mcapi","mcapi: API request successful: %s\n",strMethod.c_str());
+        if(fDebug)LogPrint("mcapi","mcapi: API request successful: %s\n",JSONRPCMethodIDForLog(strMethod,req_id).c_str());
 /* MCHN END */        
         return result;
     }
     catch (std::exception& e)
     {
-        LogPrint("mcapi","mcapi: API request failure: %s\n",strMethod.c_str());
+        if(fDebug)LogPrint("mcapi","mcapi: API request failure: %s\n",JSONRPCMethodIDForLog(strMethod,req_id).c_str());//strMethod.c_str());
         if(strcmp(e.what(),"Help message not found\n") == 0)
         {
             throw JSONRPCError(RPC_MISC_ERROR, mc_RPCHelpString(strMethod).c_str());
@@ -1386,9 +1320,17 @@ std::string HelpExampleCli(string methodname, string args){
 
 std::string HelpExampleRpc(string methodname, string args){
     return "> curl --user myusername --data-binary '{\"jsonrpc\": \"1.0\", \"id\":\"curltest\", "
-        "\"method\": \"" + std::string(mc_gState->m_NetworkParams->Name()) + " " + methodname + "\", \"params\": [" + args + "] }' -H 'content-type: text/plain;' http://127.0.0.1:"+
+        "\"method\": \"" + methodname + "\", \"params\": [" + args + "] }' -H 'content-type: text/plain;' http://127.0.0.1:"+
             strprintf("%d",(int)mc_gState->m_NetworkParams->GetInt64Param("defaultrpcport")) + "\n";// MCHN was hard-coded 8332 before
 }
 
-const CRPCTable tableRPC;
+CRPCTable tableRPC;
 std::map<std::string, std::string> mapHelpStrings;
+std::map<std::string, int> mapLogParamCounts;
+std::set<std::string> setAllowedWhenWaitingForUpgrade;
+std::set<std::string> setAllowedWhenOffline;
+std::set<std::string> setAllowedWhenLimited;
+
+std::vector<CRPCCommand> vStaticRPCCommands;
+std::vector<CRPCCommand> vStaticRPCWalletReadCommands;
+

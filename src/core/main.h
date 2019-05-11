@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef BITCOIN_MAIN_H
@@ -22,6 +22,7 @@
 #include "script/script.h"
 #include "script/sigcache.h"
 #include "script/standard.h"
+#include "filters/multichainfilter.h"
 #include "utils/sync.h"
 #include "utils/tinyformat.h"
 #include "chain/txmempool.h"
@@ -46,6 +47,7 @@ class CInv;
 class CScriptCheck;
 class CValidationInterface;
 class CValidationState;
+class CWalletTx;
 
 struct CBlockTemplate;
 struct CNodeStateStats;
@@ -54,26 +56,33 @@ struct CNodeStateStats;
 extern unsigned int DEFAULT_BLOCK_MAX_SIZE;                                     // MCHN global
 static const unsigned int DEFAULT_BLOCK_MIN_SIZE = 0;
 /** Default for -blockprioritysize, maximum space for zero/low-fee transactions **/
-static const unsigned int DEFAULT_BLOCK_PRIORITY_SIZE = 50000;
+// static const unsigned int DEFAULT_BLOCK_PRIORITY_SIZE = 50000;
 /** The maximum size for transactions we're willing to relay/mine */
 extern unsigned int MAX_STANDARD_TX_SIZE;                                       // MCHN global
 /** The maximum allowed number of signature check operations in a block (network rule) */
-static const unsigned int MAX_BLOCK_SIGOPS = MAX_BLOCK_SIZE/50;
+extern unsigned int MAX_BLOCK_SIGOPS;                                           // MCHN global
+/** The maximum number of sigops we're willing to relay/mine in a single tx */
+extern unsigned int MAX_TX_SIGOPS;                                              // MCHN global
 /** Maximum number of signature check operations in an IsStandard() P2SH script */
 static const unsigned int MAX_P2SH_SIGOPS = 15;
-/** The maximum number of sigops we're willing to relay/mine in a single tx */
-static const unsigned int MAX_TX_SIGOPS = MAX_BLOCK_SIGOPS/5;
 /** Default for -maxorphantx, maximum number of orphan transactions kept in memory */
 /* MCHN START */
 //static const unsigned int DEFAULT_MAX_ORPHAN_TRANSACTIONS = 100;
 /* MCHN START */
 //static const unsigned int DEFAULT_MAX_ORPHAN_TRANSACTIONS = 1000;
 static const unsigned int DEFAULT_MAX_ORPHAN_TRANSACTIONS = 50000;
+static const unsigned int DEFAULT_MAX_SUCCESSORS_FROM_ONE_NODE = 10;
 /* MCHN END */
 extern int MAX_OP_RETURN_SHOWN;
+extern int DEFAULT_ACCEPT_FILTER_TIMEOUT;
+extern int DEFAULT_SEND_FILTER_TIMEOUT;
+extern int MAX_STREAM_QUERY_ITEMS;
+extern int MAX_FORMATTED_DATA_DEPTH;
+extern int MIN_BLOCKS_BETWEEN_UPGRADES;
+extern unsigned int OFFCHAIN_MSG_PADDING;
 /* MCHN END */
 /** The maximum size of a blk?????.dat file (since 0.8) */
-static const unsigned int MAX_BLOCKFILE_SIZE = 0x8000000; // 128 MiB
+extern unsigned int MAX_BLOCKFILE_SIZE;                                     // MCHN global
 /** The pre-allocation chunk size for blk?????.dat files (since 0.8) */
 static const unsigned int BLOCKFILE_CHUNK_SIZE = 0x1000000; // 16 MiB
 /** The pre-allocation chunk size for rev?????.dat files (since 0.8) */
@@ -148,6 +157,7 @@ static const uint64_t nMinDiskSpace = 52428800;
 std::string MultichainServerAddress();
 void ClearMemPools();
 std::string SetLastBlock(uint256 hash);
+std::string SetLastBlock(uint256 hash,bool *fNotFound);
 //void InvalidWTx(const uint256& wtxid, const std::string& reason);
 /* MCHN END */
 
@@ -224,7 +234,7 @@ void FlushStateToDisk();
 
 /** (try to) add transaction to memory pool **/
 bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree,
-                        bool* pfMissingInputs, bool fRejectInsaneFee=false, bool fAddToWallet=true);
+                        bool* pfMissingInputs, bool fRejectInsaneFee=false, CWalletTx *wtx=NULL);
 
 
 struct CNodeStateStats {
@@ -392,17 +402,18 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 /** Context-independent validity checks */
 bool CheckBlockHeader(const CBlockHeader& block, CValidationState& state, bool fCheckPOW = true);
 bool CheckBlock(const CBlock& block, CValidationState& state, bool fCheckPOW = true, bool fCheckMerkleRoot = true);
+bool CheckBlockForUpgardableConstraints(const CBlock& block, CValidationState& state, std::string parameter, bool in_sync);
 
 /** Context-dependent validity checks */
-bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex *pindexPrev);
+bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex *pindexPrev, CBlockIndex *pindexChecked = NULL);
 bool ContextualCheckBlock(const CBlock& block, CValidationState& state, CBlockIndex *pindexPrev);
 
 /** Check a block is completely valid from start to finish (only works on top of our current best block, with cs_main held) */
 bool TestBlockValidity(CValidationState &state, const CBlock& block, CBlockIndex *pindexPrev, bool fCheckPOW = true, bool fCheckMerkleRoot = true);
 
 /** Store block on disk. If dbp is provided, the file is known to already reside on disk */
-bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex **pindex, CDiskBlockPos* dbp = NULL);
-bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex **ppindex= NULL);
+bool AcceptBlock(CBlock& block, CValidationState& state, CBlockIndex **pindex, CDiskBlockPos* dbp = NULL, int node_id = 0);
+bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state, CBlockIndex **ppindex= NULL, int node_id = 0, CBlockIndex *pindexChecked = NULL);
 
 
 
@@ -568,7 +579,7 @@ protected:
     virtual void SetBestChain(const CBlockLocator &locator) {};
     virtual void UpdatedTransaction(const uint256 &hash) {};
     virtual void Inventory(const uint256 &hash) {};
-    virtual void ResendWalletTransactions() {};
+    virtual void ResendWalletTransactions(bool fForce) {};
     virtual void BlockChecked(const CBlock&, const CValidationState&) {};
     friend void ::RegisterValidationInterface(CValidationInterface*);
     friend void ::UnregisterValidationInterface(CValidationInterface*);

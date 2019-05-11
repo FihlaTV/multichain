@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "multichain/multichain.h"
@@ -67,6 +67,17 @@ int mc_MapStringIndex::Get(const unsigned char* key,int size)
     }    
     return value;
 }
+
+void mc_MapStringIndex::Set(const unsigned char* key,int size, int value)
+{
+    std::map<string, int>::iterator it;
+    it=((std::map<string, int>*)mapObject)->find(string(key,key+size));
+    if (it != ((std::map<string, int>*)mapObject)->end())
+    {
+        it->second=value;
+    }    
+}
+
 
 void mc_MapStringString::Init()
 {

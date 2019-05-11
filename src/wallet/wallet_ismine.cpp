@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "wallet_ismine.h"
@@ -29,6 +29,28 @@ unsigned int HaveKeys(const vector<valtype>& pubkeys, const CKeyStore& keystore)
     return nResult;
 }
 
+isminetype IsMineKeyID(const CKeyStore& keystore, const CKeyID& dest)
+{
+    if (keystore.HaveKey(dest))
+        return ISMINE_SPENDABLE;
+    if (keystore.HaveWatchOnly(GetScriptForDestination(dest)))
+        return ISMINE_WATCH_ONLY;
+    return ISMINE_NO;    
+}
+
+isminetype IsMineScriptID(const CKeyStore& keystore, const CScriptID& dest)
+{
+    CScript subscript;
+    if (keystore.GetCScript(dest, subscript)) {
+        isminetype ret = IsMine(keystore, subscript);
+        if (ret == ISMINE_SPENDABLE)
+            return ret;
+    }    
+    if (keystore.HaveWatchOnly(GetScriptForDestination(dest)))
+        return ISMINE_WATCH_ONLY;
+    return ISMINE_NO;    
+}
+
 isminetype IsMine(const CKeyStore &keystore, const CTxDestination& dest)
 {
     CScript script = GetScriptForDestination(dest);
@@ -39,7 +61,7 @@ isminetype IsMine(const CKeyStore &keystore, const CScript& scriptPubKey)
 {
     vector<valtype> vSolutions;
     txnouttype whichType;
-    if (!Solver(scriptPubKey, whichType, vSolutions)) {
+    if (!TemplateSolver(scriptPubKey, whichType, vSolutions)) {
 /* MCHN START */        
 //        if (keystore.HaveWatchOnly(scriptPubKey))
         if (keystore.HaveWatchOnly(scriptPubKey.RemoveOpDrops()))

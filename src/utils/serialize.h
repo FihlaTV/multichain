@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef BITCOIN_SERIALIZE_H
@@ -21,7 +21,9 @@
 
 class CScript;
 
-static const unsigned int MAX_SIZE = 0x02000000;
+//static const unsigned int MAX_SIZE = 0x02000000;
+extern unsigned int MAX_SIZE;                                     // MCHN global
+
 
 /**
  * Used to bypass the rule against non-const reference to temporary
@@ -350,7 +352,7 @@ public:
 
     unsigned int GetSerializeSize(int, int=0) const
     {
-        return pend - pbegin;
+        return static_cast<unsigned>(pend - pbegin);
     }
 
     template<typename Stream>

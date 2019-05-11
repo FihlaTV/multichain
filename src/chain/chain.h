@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef BITCOIN_CHAIN_H
@@ -11,6 +11,7 @@
 #include "chain/pow.h"
 #include "utils/tinyformat.h"
 #include "structs/uint256.h"
+#include "keys/pubkey.h"
 
 #include <vector>
 
@@ -145,6 +146,11 @@ public:
 /* MCHN START */    
     int nHeightMinedByMe;
     uint32_t nCanMine;
+    double dTimeReceived;
+    CPubKey kMiner;
+    bool fPassedMinerPrecheck;
+    int32_t nFirstSuccessor;
+    CBlockIndex *pNextOnThisHeight;
 /* MCHN END */
     
     void SetNull()
@@ -171,6 +177,10 @@ public:
 /* MCHN START */    
         nHeightMinedByMe=0;
         nCanMine=0;
+        dTimeReceived=0.;
+        fPassedMinerPrecheck=false;
+        nFirstSuccessor=0;
+        pNextOnThisHeight=NULL;
 /* MCHN END */
     }
 

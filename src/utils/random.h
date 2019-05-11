@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT/X11 software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef BITCOIN_RANDOM_H
@@ -15,7 +15,7 @@
  * Seed OpenSSL PRNG with additional entropy data
  */
 void RandAddSeed();
-void RandAddSeedPerfmon();
+//void RandAddSeedPerfmon();
 
 /**
  * Functions to gather random data via the OpenSSL PRNG
@@ -24,6 +24,12 @@ void GetRandBytes(unsigned char* buf, int num);
 uint64_t GetRand(uint64_t nMax);
 int GetRandInt(int nMax);
 uint256 GetRandHash();
+
+/**
+ * Function to gather random data from multiple sources, failing whenever any
+ * of those source fail to provide a result.
+ */
+void GetStrongRandBytes(unsigned char* buf, int num);
 
 /**
  * Seed insecure_rand using the random pool.

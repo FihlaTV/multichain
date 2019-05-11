@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef MULTICHAIN_DEFINE_H
@@ -7,6 +7,10 @@
 #include <stdio.h>
 #include <time.h>
 #include <sys/time.h>
+
+#ifdef MAC_OSX
+#define lseek64 lseek
+#endif
 
 #ifndef WIN32
 
@@ -57,6 +61,7 @@
 
 #define MC_FOM_NONE                     0x00000000
 #define MC_FOM_RELATIVE_TO_DATADIR      0x00000001
+#define MC_FOM_RELATIVE_TO_LOGDIR       0x00000002
 #define MC_FOM_RELATIVE_MASK            0x0000000F
 #define MC_FOM_CREATE_DIR               0x00000100
 

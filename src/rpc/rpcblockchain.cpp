@@ -1,11 +1,12 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "chain/checkpoints.h"
 #include "core/main.h"
+#include "rpc/rpcserver.h"
 #include "rpc/rpcserver.h"
 #include "utils/sync.h"
 #include "utils/util.h"
@@ -25,10 +26,15 @@ extern void TxToJSON(const CTransaction& tx, const uint256 hashBlock, Object& en
 
 /* MCHN START */
 bool ParseMultichainTxOutToBuffer(uint256 hash,const CTxOut& txout,mc_Buffer *amounts,mc_Script *lpScript,int *allowed,int *required,string& strFailReason);
+vector<int> ParseBlockSetIdentifier(Value blockset_identifier);
 bool CreateAssetBalanceList(const CTxOut& out,mc_Buffer *amounts,mc_Script *lpScript);
-Object AssetEntry(const unsigned char *txid,int64_t quantity,int output_level);
+Object AssetEntry(const unsigned char *txid,int64_t quantity,uint32_t output_level);
 Array PermissionEntries(const CTxOut& txout,mc_Script *lpScript,bool fLong);
+Array PerOutputDataEntries(const CTxOut& txout,mc_Script *lpScript,uint256 txid,int vout);
 string EncodeHexTx(const CTransaction& tx);
+int OrphanPoolSize();
+bool paramtobool(Value param);
+bool StringToInt(string str,int *value);
 /* MCHN END */
 
 void ScriptPubKeyToJSON(const CScript& scriptPubKey, Object& out, bool fIncludeHex);
@@ -63,6 +69,52 @@ double GetDifficulty(const CBlockIndex* blockindex)
 
     return dDiff;
 }
+
+Object blockToJSONForListBlocks(const CBlock& block, const CBlockIndex* blockindex, bool verbose)
+{
+    Object result;
+    result.push_back(Pair("hash", blockindex->GetBlockHash().GetHex()));
+/* MCHN START */    
+    CKeyID keyID;
+    Value miner;
+    if(mc_gState->m_NetworkParams->IsProtocolMultichain())
+    {
+        if(mc_gState->m_Permissions->GetBlockMiner(blockindex->nHeight,(unsigned char*)&keyID) == MC_ERR_NOERROR)
+        {
+            miner=CBitcoinAddress(keyID).ToString();
+        }
+    }
+    result.push_back(Pair("miner", miner));
+/* MCHN END */        
+    int confirmations = -1;
+    // Only report confirmations if the block is on the main chain
+    if (chainActive.Contains(blockindex))
+        confirmations = chainActive.Height() - blockindex->nHeight + 1;
+    result.push_back(Pair("confirmations", confirmations));
+    result.push_back(Pair("height", blockindex->nHeight));
+    result.push_back(Pair("time", (int64_t)blockindex->nTime));
+    result.push_back(Pair("txcount", (int64_t)blockindex->nTx));
+    
+    if(verbose)
+    {
+        result.push_back(Pair("size", (int)::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION)));
+        result.push_back(Pair("version", block.nVersion));
+        result.push_back(Pair("merkleroot", block.hashMerkleRoot.GetHex()));
+        result.push_back(Pair("nonce", (uint64_t)block.nNonce));
+        result.push_back(Pair("bits", strprintf("%08x", block.nBits)));
+        result.push_back(Pair("difficulty", GetDifficulty(blockindex)));
+        result.push_back(Pair("chainwork", blockindex->nChainWork.GetHex()));
+
+        if (blockindex->pprev)
+            result.push_back(Pair("previousblockhash", blockindex->pprev->GetBlockHash().GetHex()));
+        CBlockIndex *pnext = chainActive.Next(blockindex);
+        if (pnext)
+            result.push_back(Pair("nextblockhash", pnext->GetBlockHash().GetHex()));
+    }
+    
+    return result;
+}
+
 
 
 Object blockToJSON(const CBlock& block, const CBlockIndex* blockindex, bool txDetails = false, int verbose_level = 1)
@@ -131,6 +183,11 @@ Object blockToJSON(const CBlock& block, const CBlockIndex* blockindex, bool txDe
     result.push_back(Pair("difficulty", GetDifficulty(blockindex)));
     result.push_back(Pair("chainwork", blockindex->nChainWork.GetHex()));
 
+    if(blockindex->nStatus & BLOCK_FAILED_MASK)
+    {
+        result.push_back(Pair("valid", false));        
+    }
+    
     if (blockindex->pprev)
         result.push_back(Pair("previousblockhash", blockindex->pprev->GetBlockHash().GetHex()));
     CBlockIndex *pnext = chainActive.Next(blockindex);
@@ -222,7 +279,7 @@ Value getblockhash(const Array& params, bool fHelp)
 
     int64_t nHeight = params[0].get_int64();                                    // MCHN - was int
     if (nHeight < 0 || nHeight > chainActive.Height())
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "Block height out of range");
+        throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block height out of range");
 
     CBlockIndex* pblockindex = chainActive[nHeight];
     return pblockindex->GetBlockHash().GetHex();
@@ -237,7 +294,7 @@ Value clearmempool(const Array& params, bool fHelp)
     uint32_t required_paused_state=MC_NPS_INCOMING | MC_NPS_MINING;
     if((mc_gState->m_NodePausedState & required_paused_state) != required_paused_state)
     {
-        throw JSONRPCError(RPC_INVALID_REQUEST, "Local mining and the processing of incoming transactions and blocks should be paused.");        
+        throw JSONRPCError(RPC_NOT_ALLOWED, "Local mining and the processing of incoming transactions and blocks should be paused.");        
     }
     
     ClearMemPools();
@@ -253,7 +310,7 @@ Value setlastblock(const Array& params, bool fHelp)
     uint32_t required_paused_state=MC_NPS_INCOMING | MC_NPS_MINING;
     if((mc_gState->m_NodePausedState & required_paused_state) != required_paused_state)
     {
-        throw JSONRPCError(RPC_INVALID_REQUEST, "Local mining and the processing of incoming transactions and blocks should be paused.");        
+        throw JSONRPCError(RPC_NOT_ALLOWED, "Local mining and the processing of incoming transactions and blocks should be paused.");        
     }
     
     
@@ -272,7 +329,7 @@ Value setlastblock(const Array& params, bool fHelp)
                 nHeight+=chainActive.Height();
                 if (nHeight <= 0 || nHeight > chainActive.Height())
                 {
-                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Block height out of range");
+                    throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block height out of range");
                 }
             }
 
@@ -280,17 +337,99 @@ Value setlastblock(const Array& params, bool fHelp)
         }
         
         uint256 hash(strHash);
-
-        string result=SetLastBlock(hash);
+        bool fNotFound;
+        
+        string result=SetLastBlock(hash,&fNotFound);
 
         if(result.size())
         {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, result);                
+            if(fNotFound)
+            {
+                throw JSONRPCError(RPC_BLOCK_NOT_FOUND, result);                
+            }
+            else
+            {
+                throw JSONRPCError(RPC_VERIFY_REJECTED, result);                                
+            }
         }        
     }
     
     return chainActive.Tip()->GetBlockHash().GetHex();
 }
+
+Value listblocks(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 2)                        // MCHN
+        throw runtime_error("Help message not found\n");
+    
+    Array result;
+    vector <int> heights=ParseBlockSetIdentifier(params[0]);
+    
+    bool verbose=false;
+    
+    if (params.size() > 1)    
+    {
+        verbose=paramtobool(params[1]);
+    }
+    
+    for(unsigned int i=0;i<heights.size();i++)
+    {
+        CBlock block;
+        if(verbose)
+        {
+            if(!ReadBlockFromDisk(block, chainActive[heights[i]]))
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Can't read block from disk");
+        }
+        
+        result.push_back(blockToJSONForListBlocks(block, chainActive[heights[i]], verbose));
+    }
+    
+    return result;
+}
+
+Value getlastblockinfo(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() > 1)
+        mc_ThrowHelpMessage("getlastblockinfo");        
+//        throw runtime_error("Help message not found\n");
+    
+    CBlockIndex* pblockindex = chainActive.Tip();
+    
+    if(params.size() == 1)
+    {
+        if(params[0].type() != int_type)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Skip should be integer");
+        }
+        
+        int skip=params[0].get_int();
+        if (skip < 0 || skip > chainActive.Height())
+            throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Skip out of range");
+        
+        pblockindex=chainActive[chainActive.Height() - skip];
+    }
+   
+    Object result;
+    result.push_back(Pair("hash", pblockindex->GetBlockHash().GetHex()));
+    result.push_back(Pair("height", pblockindex->nHeight));
+    result.push_back(Pair("time", pblockindex->GetBlockTime()));
+    result.push_back(Pair("txcount", (int)pblockindex->nTx));
+    
+    CKeyID keyID;
+    Value miner;
+    if(mc_gState->m_NetworkParams->IsProtocolMultichain())
+    {
+        if(mc_gState->m_Permissions->GetBlockMiner(pblockindex->nHeight,(unsigned char*)&keyID) == MC_ERR_NOERROR)
+        {
+            miner=CBitcoinAddress(keyID).ToString();
+        }
+    }
+    result.push_back(Pair("miner", miner));
+    
+    
+    return result;    
+}
+
 /* MCHN END */
 
 
@@ -299,15 +438,37 @@ Value getblock(const Array& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 2)                        // MCHN
         throw runtime_error("Help message not found\n");
 
-    std::string strHash = params[0].get_str();
-    if(strHash.size() < 64)
+    int nHeight=-1;
+    bool is_hash=true;
+    std::string strHash;
+    
+    if(params[0].type() == int_type)
     {
-        int nHeight = atoi(params[0].get_str().c_str());
-        if (nHeight < 0 || nHeight > chainActive.Height())
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "Block height out of range");
-
-        strHash=chainActive[nHeight]->GetBlockHash().GetHex();            
+        nHeight=params[0].get_int();
+        is_hash=false;
     }
+    else
+    {
+        strHash = params[0].get_str();
+        if( strHash.size() < 64 )
+        {
+            if(!StringToInt(params[0].get_str(),&nHeight))
+            {
+                throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block height should be integer");
+            }
+            is_hash=false;
+        }        
+    }
+    
+    if(!is_hash)
+    {
+        if (nHeight < 0 || nHeight > chainActive.Height())
+            throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block height out of range");
+
+        strHash=chainActive[nHeight]->GetBlockHash().GetHex();                    
+    }
+        
+//        int nHeight = atoi(params[0].get_str().c_str());
     uint256 hash(strHash);
 /*
     bool fVerbose = true;
@@ -335,11 +496,19 @@ Value getblock(const Array& params, bool fHelp)
     }    
     
     if (mapBlockIndex.count(hash) == 0)
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
-
+        throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block not found");
+    
     CBlock block;
     CBlockIndex* pblockindex = mapBlockIndex[hash];
 
+    if(pMultiChainFilterEngine->m_TxID != 0)
+    {
+        if (!chainActive.Contains(pblockindex))
+        {
+            throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block not found in active chain");
+        }    
+    }
+    
     if(!ReadBlockFromDisk(block, pblockindex))
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Can't read block from disk");
 
@@ -376,6 +545,32 @@ Value gettxoutsetinfo(const Array& params, bool fHelp)
     return ret;
 }
 
+Value getfiltertxinput(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)                       
+        mc_ThrowHelpMessage("getfiltertxinput");        
+//        throw JSONRPCError(RPC_INVALID_PARAMS, "Wrong number of parameters");                    
+    
+    int64_t vin = params[0].get_int64();                                          
+    
+    if(pMultiChainFilterEngine->m_Vout >= 0)
+    {
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "This callback cannot be used in stream filters");                            
+    }
+    
+    if( (vin < 0) || (vin >= (unsigned int)pMultiChainFilterEngine->m_Tx.vin.size()) )
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "vin out of range");                    
+    }
+    
+    
+    Array getxoutparams;
+    getxoutparams.push_back(pMultiChainFilterEngine->m_Tx.vin[vin].prevout.hash.ToString());
+    getxoutparams.push_back((int64_t)pMultiChainFilterEngine->m_Tx.vin[vin].prevout.n);
+        
+    return gettxout(getxoutparams,false);
+}
+
 Value gettxout(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() < 2 || params.size() > 3)                        // MCHN
@@ -396,7 +591,10 @@ Value gettxout(const Array& params, bool fHelp)
         CCoinsViewMemPool view(pcoinsTip, mempool);
         if (!view.GetCoins(hash, coins))
             return Value::null;
-        mempool.pruneSpent(hash, coins); // TODO: this should be done by the CCoinsViewMemPool
+        if(pMultiChainFilterEngine->m_TxID == 0)                                // In filter we already checked this input exists, but mempool is dirty
+        {
+            mempool.pruneSpent(hash, coins); // TODO: this should be done by the CCoinsViewMemPool
+        }
     } else {
         if (!pcoinsTip->GetCoins(hash, coins))
             return Value::null;
@@ -420,12 +618,10 @@ Value gettxout(const Array& params, bool fHelp)
     
 /* MCHN START */        
 
-    mc_Buffer *asset_amounts;
-    asset_amounts=new mc_Buffer;
-    mc_InitABufferMap(asset_amounts);    
-    
-    mc_Script *lpScript;
-    lpScript=new mc_Script;    
+    mc_Buffer *asset_amounts=mc_gState->m_TmpBuffers->m_RpcABBuffer1;
+       
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();
     
     asset_amounts->Clear();
     CTxOut txout=coins.vout[n];
@@ -452,7 +648,7 @@ Value gettxout(const Array& params, bool fHelp)
                 }
             }                
 
-            asset_entry=AssetEntry(txid,mc_GetABQuantity(ptr),3);
+            asset_entry=AssetEntry(txid,mc_GetABQuantity(ptr),0x05);
             
             if(mc_GetABRefType(ptr) == MC_AST_ASSET_REF_TYPE_GENESIS)
 //            if(mc_GetLE(ptr,4) == 0)
@@ -462,11 +658,21 @@ Value gettxout(const Array& params, bool fHelp)
             assets.push_back(asset_entry);
         }
 
-        ret.push_back(Pair("assets", assets));
+        if( (assets.size() > 0) || (mc_gState->m_Compatibility & MC_VCM_1_0) )
+        {
+            ret.push_back(Pair("assets", assets));
+        }
     }
     Array permissions=PermissionEntries(txout,lpScript,false);
-    ret.push_back(Pair("permissions", permissions));
-    
+    if( (permissions.size() > 0) || (mc_gState->m_Compatibility & MC_VCM_1_0) )
+    {
+        ret.push_back(Pair("permissions", permissions));
+    }
+    Array data=PerOutputDataEntries(txout,lpScript,hash,n);
+    if(data.size())
+    {
+        ret.push_back(Pair("data", data));
+    }
 /* MCHN END */        
 
     return ret;
@@ -508,6 +714,38 @@ Value getblockchaininfo(const Array& params, bool fHelp)
     obj.push_back(Pair("difficulty",            (double)GetDifficulty()));
     obj.push_back(Pair("verificationprogress",  Checkpoints::GuessVerificationProgress(chainActive.Tip())));
     obj.push_back(Pair("chainwork",             chainActive.Tip()->nChainWork.GetHex()));
+        
+    
+    double chain_balance=0.;
+    if(COIN)
+    {
+        int chain_height=(int)chainActive.Height();
+        int64_t epoch_size=Params().SubsidyHalvingInterval();
+        int complete_epochs=chain_height / epoch_size;
+        int blocks_in_this_epoch=chain_height%epoch_size+1;
+        int64_t total_value=0;
+        int64_t epoch_value=MCP_INITIAL_BLOCK_REWARD;
+        for(int epoch=0;epoch<complete_epochs;epoch++)
+        {
+            total_value+=epoch_value*epoch_size;
+            epoch_value >>= 1;
+        }
+        total_value+=epoch_value*(int64_t)blocks_in_this_epoch;
+        if(chain_height >= 0)
+        {
+            total_value-=MCP_INITIAL_BLOCK_REWARD;                                      // Genesis block reward is unspendable
+        }
+        if(MCP_FIRST_BLOCK_REWARD >= 0)
+        {
+            if(chain_height >= 1)
+            {
+                total_value+=MCP_FIRST_BLOCK_REWARD-MCP_INITIAL_BLOCK_REWARD;
+            }
+        }
+        chain_balance=(double)total_value/(double)COIN;
+    }
+    obj.push_back(Pair("chainrewards",             chain_balance));
+    
     return obj;
 }
 
@@ -594,6 +832,7 @@ Value getmempoolinfo(const Array& params, bool fHelp)
     Object ret;
     ret.push_back(Pair("size", (int64_t) mempool.size()));
     ret.push_back(Pair("bytes", (int64_t) mempool.GetTotalTxSize()));
+//    ret.push_back(Pair("orphan", OrphanPoolSize()));
 
     return ret;
 }
@@ -610,7 +849,7 @@ Value invalidateblock(const Array& params, bool fHelp)
     {
         LOCK(cs_main);
         if (mapBlockIndex.count(hash) == 0)
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+            throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block not found");
 
         CBlockIndex* pblockindex = mapBlockIndex[hash];
         InvalidateBlock(state, pblockindex);
@@ -639,7 +878,7 @@ Value reconsiderblock(const Array& params, bool fHelp)
     {
         LOCK(cs_main);
         if (mapBlockIndex.count(hash) == 0)
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
+            throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block not found");
 
         CBlockIndex* pblockindex = mapBlockIndex[hash];
         ReconsiderBlock(state, pblockindex);

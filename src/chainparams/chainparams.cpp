@@ -1,7 +1,7 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "chainparams/chainparams.h"
@@ -173,22 +173,41 @@ public:
         vSeeds.push_back(CDNSSeedData("bitcoinstats.com", "seed.bitcoinstats.com"));
         vSeeds.push_back(CDNSSeedData("xf2.org", "bitseed.xf2.org"));
 
+/*        
         base58Prefixes[PUBKEY_ADDRESS] = list_of(0);
         base58Prefixes[SCRIPT_ADDRESS] = list_of(5);
         base58Prefixes[SECRET_KEY] =     list_of(128);
         base58Prefixes[EXT_PUBLIC_KEY] = list_of(0x04)(0x88)(0xB2)(0x1E);
         base58Prefixes[EXT_SECRET_KEY] = list_of(0x04)(0x88)(0xAD)(0xE4);
-
+*/
+        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,0);
+        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,5);
+        base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,128);
+        base58Prefixes[EXT_PUBLIC_KEY].clear();
+        base58Prefixes[EXT_PUBLIC_KEY].push_back(0x04);
+        base58Prefixes[EXT_PUBLIC_KEY].push_back(0x88);
+        base58Prefixes[EXT_PUBLIC_KEY].push_back(0xB2);
+        base58Prefixes[EXT_PUBLIC_KEY].push_back(0x1E);
+        base58Prefixes[EXT_SECRET_KEY].clear();
+        base58Prefixes[EXT_SECRET_KEY].push_back(0x04);
+        base58Prefixes[EXT_SECRET_KEY].push_back(0x88);
+        base58Prefixes[EXT_SECRET_KEY].push_back(0xAD);
+        base58Prefixes[EXT_SECRET_KEY].push_back(0xE4);
+                
+        
         convertSeed6(vFixedSeeds, pnSeed6_main, ARRAYLEN(pnSeed6_main));
 
         fRequireRPCPassword = true;
         fMiningRequiresPeers = true;
+        dMineEmptyRounds = -1.;
+        dMiningTurnover=1.0;
         fDefaultCheckMemPool = false;
         fAllowMinDifficultyBlocks = false;
         fRequireStandard = true;
         fMineBlocksOnDemand = false;
         fSkipProofOfWorkCheck = false;
         fTestnetToBeDeprecatedFieldRPC = false;
+        fDisallowUnsignedBlockNonce = false;
     }
 
     const Checkpoints::CCheckpointData& Checkpoints() const 
@@ -232,16 +251,35 @@ public:
         vSeeds.push_back(CDNSSeedData("bluematt.me", "testnet-seed.bluematt.me"));
         vSeeds.push_back(CDNSSeedData("bitcoin.schildbach.de", "testnet-seed.bitcoin.schildbach.de"));
 
+/*        
         base58Prefixes[PUBKEY_ADDRESS] = list_of(111);
         base58Prefixes[SCRIPT_ADDRESS] = list_of(196);
         base58Prefixes[SECRET_KEY]     = list_of(239);
         base58Prefixes[EXT_PUBLIC_KEY] = list_of(0x04)(0x35)(0x87)(0xCF);
         base58Prefixes[EXT_SECRET_KEY] = list_of(0x04)(0x35)(0x83)(0x94);
+*/
+        
+        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,111);
+        base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,196);
+        base58Prefixes[SECRET_KEY] =     std::vector<unsigned char>(1,239);
+        base58Prefixes[EXT_PUBLIC_KEY].clear();
+        base58Prefixes[EXT_PUBLIC_KEY].push_back(0x04);
+        base58Prefixes[EXT_PUBLIC_KEY].push_back(0x35);
+        base58Prefixes[EXT_PUBLIC_KEY].push_back(0x87);
+        base58Prefixes[EXT_PUBLIC_KEY].push_back(0xCF);
+        base58Prefixes[EXT_SECRET_KEY].clear();
+        base58Prefixes[EXT_SECRET_KEY].push_back(0x04);
+        base58Prefixes[EXT_SECRET_KEY].push_back(0x35);
+        base58Prefixes[EXT_SECRET_KEY].push_back(0x83);
+        base58Prefixes[EXT_SECRET_KEY].push_back(0x94);
+        
 
         convertSeed6(vFixedSeeds, pnSeed6_test, ARRAYLEN(pnSeed6_test));
 
         fRequireRPCPassword = true;
         fMiningRequiresPeers = true;
+        dMineEmptyRounds = -1.;
+        dMiningTurnover=1.0;
         fDefaultCheckMemPool = false;
         fAllowMinDifficultyBlocks = true;
         fRequireStandard = false;
@@ -287,6 +325,8 @@ public:
 
         fRequireRPCPassword = false;
         fMiningRequiresPeers = false;
+        dMineEmptyRounds = -1.;
+        dMiningTurnover=1.0;
         fDefaultCheckMemPool = true;
         fAllowMinDifficultyBlocks = true;
         fRequireStandard = false;
@@ -314,6 +354,8 @@ public:
 
         fRequireRPCPassword = false;
         fMiningRequiresPeers = false;
+        dMineEmptyRounds = -1.;
+        dMiningTurnover=1.0;
         fDefaultCheckMemPool = true;
         fAllowMinDifficultyBlocks = false;
         fMineBlocksOnDemand = true;
@@ -455,14 +497,6 @@ public:
         nTargetTimespan = (int)mc_gState->m_NetworkParams->GetInt64Param("targetadjustfreq"); 
         nTargetSpacing = (int)mc_gState->m_NetworkParams->GetInt64Param("targetblocktime");
 
-        //! Modify the testnet genesis block so the timestamp is valid for a later start.
-/*        
-        genesis.nTime = 1296688602;
-        genesis.nNonce = 414098458;
-        hashGenesisBlock = genesis.GetHash();
-        assert(hashGenesisBlock == uint256("0x000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943"));
-*/
-
         vFixedSeeds.clear();
         vSeeds.clear();
 
@@ -470,23 +504,32 @@ public:
         ucPtr=(const unsigned char*)mc_gState->m_NetworkParams->GetParam("addresspubkeyhashversion",&size);        
         if(ucPtr)
         {
-            base58Prefixes[PUBKEY_ADDRESS] = list_of(ucPtr[0])(ucPtr[1])(ucPtr[2])(ucPtr[3]);
+            base58Prefixes[PUBKEY_ADDRESS].clear();
+            for(int i=0;i<size;i++)
+            {
+                base58Prefixes[PUBKEY_ADDRESS].push_back(ucPtr[i]);
+            }
         }
-        base58Prefixes[PUBKEY_ADDRESS].resize(size);
                 
         ucPtr=(const unsigned char*)mc_gState->m_NetworkParams->GetParam("addressscripthashversion",&size);        
         if(ucPtr)
         {
-            base58Prefixes[SCRIPT_ADDRESS] = list_of(ucPtr[0])(ucPtr[1])(ucPtr[2])(ucPtr[3]);
+            base58Prefixes[SCRIPT_ADDRESS].clear();
+            for(int i=0;i<size;i++)
+            {
+                base58Prefixes[SCRIPT_ADDRESS].push_back(ucPtr[i]);
+            }
         }
-        base58Prefixes[SCRIPT_ADDRESS].resize(size);
 
         ucPtr=(const unsigned char*)mc_gState->m_NetworkParams->GetParam("privatekeyversion",&size);        
         if(ucPtr)
         {
-            base58Prefixes[SECRET_KEY] = list_of(ucPtr[0])(ucPtr[1])(ucPtr[2])(ucPtr[3]);
+            base58Prefixes[SECRET_KEY].clear();
+            for(int i=0;i<size;i++)
+            {
+                base58Prefixes[SECRET_KEY].push_back(ucPtr[i]);
+            }
         }
-        base58Prefixes[SECRET_KEY].resize(size);
 
 /*  // MCHN-TODO currently copied from main, decide what to do with it later.
         base58Prefixes[EXT_PUBLIC_KEY] = list_of(0x04)(0x35)(0x87)(0xCF);
@@ -495,15 +538,60 @@ public:
         
 //        convertSeed6(vFixedSeeds, pnSeed6_test, ARRAYLEN(pnSeed6_test));
 
+        SetMultiChainParams();
+        SetMultiChainRuntimeParams();
         
-        fMiningRequiresPeers = (mc_gState->m_NetworkParams->GetInt64Param("miningrequirespeers") != 0);
-        fMiningRequiresPeers=GetBoolArg("-miningrequirespeers", fMiningRequiresPeers);
-        fAllowMinDifficultyBlocks = (mc_gState->m_NetworkParams->GetInt64Param("allowmindifficultyblocks") != 0);
         fRequireStandard = (mc_gState->m_NetworkParams->GetInt64Param("onlyacceptstdtxs") != 0);
         fRequireStandard=GetBoolArg("-requirestandard", fRequireStandard);
-        fMineBlocksOnDemand = GetBoolArg("-mineblocksondemand", false);
         fTestnetToBeDeprecatedFieldRPC = (mc_gState->m_NetworkParams->GetInt64Param("chainistestnet") != 0);
-
+    }
+    
+    void SetMultiChainParams()
+    {
+        fAllowMinDifficultyBlocks=false;
+        if(mc_gState->m_Features->FixedIn1000920001())
+        {
+            fAllowMinDifficultyBlocks = (mc_gState->m_NetworkParams->GetInt64Param("allowmindifficultyblocks") != 0);            
+        }
+        fDisallowUnsignedBlockNonce=false;
+        if(mc_gState->m_Features->NonceInMinerSignature())
+        {
+            if(nTargetTimespan <= 0)
+            {
+                if(mc_gState->m_NetworkParams->GetInt64Param("powminimumbits") <= MAX_NBITS_FOR_SIGNED_NONCE)
+                {
+                    fDisallowUnsignedBlockNonce=true;
+                }
+            }
+        }
+    }
+    
+    void SetMultiChainParam(const char*param_name,int64_t value)
+    {
+        if(strcmp(param_name,"targetblocktime") == 0)
+        {
+            nTargetSpacing=value;
+        }
+    }
+    
+    void SetMultiChainRuntimeParams()
+    {
+        fMineBlocksOnDemand = GetBoolArg("-mineblocksondemand", false);
+        fMiningRequiresPeers = (mc_gState->m_NetworkParams->GetInt64Param("miningrequirespeers") != 0);
+        fMiningRequiresPeers=GetBoolArg("-miningrequirespeers", fMiningRequiresPeers);        
+        nLockAdminMineRounds=GetArg("-lockadminminerounds",mc_gState->m_NetworkParams->GetInt64Param("lockadminminerounds"));        
+        dMineEmptyRounds=mc_gState->m_NetworkParams->GetDoubleParam("mineemptyrounds");
+        string sMineEmptyRounds=GetArg("-mineemptyrounds", "Not Set");
+        if(sMineEmptyRounds != "Not Set")
+        {
+            dMineEmptyRounds=atof(sMineEmptyRounds.c_str());
+        }                    
+        dMiningTurnover=mc_gState->m_NetworkParams->GetDoubleParam("miningturnover");
+        string sMinerDrift=GetArg("-miningturnover", "Not Set");
+        if(sMinerDrift != "Not Set")
+        {
+            dMiningTurnover=atof(sMinerDrift.c_str());
+        }                    
     }
     
     void SetGenesis()
@@ -532,26 +620,13 @@ public:
         CMutableTransaction txNew;
         txNew.vin.resize(1);
 
-/*        
-        ptrOpReturnScript=NULL;
-        
-        if(mc_gState->m_Features->Streams() == 0)
-        {
-            ptrOpReturnScript=(unsigned char*)mc_gState->m_NetworkParams->GetParam("genesisopreturnscript",&sizeOpReturn);        
-        }
-*/         
         root_stream_name_size=0;
-        root_stream_name=NULL;
-        if(mc_gState->m_Features->Streams())
+        root_stream_name=(unsigned char *)mc_gState->m_NetworkParams->GetParam("rootstreamname",&root_stream_name_size);        
+        if(mc_gState->m_NetworkParams->IsProtocolMultichain() == 0)
         {
-            root_stream_name=(unsigned char *)mc_gState->m_NetworkParams->GetParam("rootstreamname",&root_stream_name_size);        
-            if(mc_gState->m_NetworkParams->IsProtocolMultichain() == 0)
-            {
-                root_stream_name_size=0;
-            }    
-        }
-//        if((sizeOpReturn > 0) && (ptrOpReturnScript[0] == OP_RETURN))
-        if(root_stream_name_size)
+            root_stream_name_size=0;
+        }    
+        if(root_stream_name_size > 1)
         {
             txNew.vout.resize(2);                        
         }
@@ -578,21 +653,13 @@ public:
             txNew.vout[0].scriptPubKey = CScript() << vector<unsigned char>(ptrPubKeyHash, ptrPubKeyHash + size) << OP_CHECKSIG;       
         }
         
-//        if(mc_gState->m_NetworkParams->GetInt64Param("anyonecanmine") == 0)
         if(mc_gState->m_NetworkParams->IsProtocolMultichain())
         {
             mc_Script *lpScript;
             
             lpScript=new mc_Script;
             
-            if(mc_gState->m_Features->Streams())
-            {
-                lpScript->SetPermission(MC_PTP_GLOBAL_ALL,0,0xffffffff,(uint32_t)mc_gState->m_NetworkParams->GetInt64Param("genesistimestamp"));
-            }
-            else
-            {
-                lpScript->SetPermission(MC_PTP_ALL,0,0xffffffff,(uint32_t)mc_gState->m_NetworkParams->GetInt64Param("genesistimestamp"));                
-            }
+            lpScript->SetPermission(MC_PTP_GLOBAL_ALL,0,0xffffffff,(uint32_t)mc_gState->m_NetworkParams->GetInt64Param("genesistimestamp"));
             
             elem = lpScript->GetData(0,&elem_size);
             txNew.vout[0].scriptPubKey << vector<unsigned char>(elem, elem + elem_size) << OP_DROP;
@@ -600,7 +667,7 @@ public:
             delete lpScript;            
         }
         
-        if(root_stream_name_size)
+        if(root_stream_name_size > 1)
         {        
             txNew.vout[1].nValue=0;
             lpDetails=new mc_Script;
@@ -612,13 +679,10 @@ public:
             }
 
 
-            if(mc_gState->m_Features->FixedIn10007())
+            if( (root_stream_name_size > 1) && (root_stream_name[root_stream_name_size - 1] == 0x00) )
             {
-                if( (root_stream_name_size > 1) && (root_stream_name[root_stream_name_size - 1] == 0x00) )
-                {
-                    root_stream_name_size--;
-                }           
-            }
+                root_stream_name_size--;
+            }           
 
             
             lpDetails->SetSpecialParamValue(MC_ENT_SPRM_NAME,root_stream_name,root_stream_name_size);
@@ -629,56 +693,16 @@ public:
     
             lpDetailsScript=new mc_Script;
             
-            if(mc_gState->m_Features->OpDropDetailsScripts())
-            {
-                lpDetailsScript->SetNewEntityType(MC_ENT_TYPE_STREAM,0,script,bytes);
+            lpDetailsScript->SetNewEntityType(MC_ENT_TYPE_STREAM,0,script,bytes);
 
-                elem = lpDetailsScript->GetData(0,&elem_size);
-                txNew.vout[1].scriptPubKey=CScript();
-                txNew.vout[1].scriptPubKey << vector<unsigned char>(elem, elem + elem_size) << OP_DROP << OP_RETURN;                        
-            }
-            else
-            {                            
-                lpDetailsScript->SetNewEntityType(MC_ENT_TYPE_STREAM);
-
-                lpDetailsScript->SetGeneralDetails(script,bytes);
-                txNew.vout[1].scriptPubKey=CScript();
-
-                for(int e=0;e<lpDetailsScript->GetNumElements();e++)
-                {
-                    elem = lpDetailsScript->GetData(e,&elem_size);
-                    if(e == (lpDetailsScript->GetNumElements() - 1) )
-                    {
-                        if(elem_size > 0)
-                        {
-                            txNew.vout[1].scriptPubKey << OP_RETURN << vector<unsigned char>(elem, elem + elem_size);
-                        }
-                        else
-                        {
-                            txNew.vout[1].scriptPubKey << OP_RETURN;
-                        }
-                    }
-                    else
-                    {
-                        if(elem_size > 0)
-                        {
-                            txNew.vout[1].scriptPubKey << vector<unsigned char>(elem, elem + elem_size) << OP_DROP;
-                        }                
-                    }
-                }
-            }
+            elem = lpDetailsScript->GetData(0,&elem_size);
+            txNew.vout[1].scriptPubKey=CScript();
+            txNew.vout[1].scriptPubKey << vector<unsigned char>(elem, elem + elem_size) << OP_DROP << OP_RETURN;                        
             
             delete lpDetails;
             delete lpDetailsScript;
         }        
         
-/*        
-        if(ptrOpReturnScript[0] == OP_RETURN)
-        {
-            txNew.vout[1].nValue = 0;
-            txNew.vout[1].scriptPubKey = CScript() << vector<unsigned char>(ptrOpReturnScript+1, ptrOpReturnScript + sizeOpReturn - 1);                    
-        }
-*/       
         
         genesis.vtx.push_back(txNew);
         genesis.hashPrevBlock = 0;
@@ -694,10 +718,12 @@ public:
                
         assert(strcmp(storedHash,hashGenesisBlock.GetHex().c_str()) == 0);
         
+/*        
         mapCheckpointsMultichain =
         boost::assign::map_list_of
         ( 0, uint256(storedHash))
         ;        
+ */ 
 //        assert(hashGenesisBlock == uint256("0x0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"));
         
     }
@@ -721,6 +747,22 @@ bool SelectMultiChainParams(const char *NetworkName)
     pCurrentParams = &multiChainParams;
     
     return true;
+}
+
+void SetMultiChainParams()
+{
+    multiChainParams.SetMultiChainParams();
+}
+
+void SetMultiChainParam(const char*param_name,int64_t value)
+{
+    multiChainParams.SetMultiChainParam(param_name,value);
+}
+
+
+void SetMultiChainRuntimeParams()
+{
+    multiChainParams.SetMultiChainRuntimeParams();
 }
 
 bool InitializeMultiChainParams()

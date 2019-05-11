@@ -1,13 +1,108 @@
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "wallet/wallettxs.h"
+#include "utils/core_io.h"
+#include "community/community.h"
+
+#include "json/json_spirit_utils.h"
+#include "json/json_spirit_value.h"
+using namespace json_spirit;
+
+#include <boost/thread.hpp>
+#include <boost/algorithm/string/replace.hpp>
+#include "json/json_spirit_writer_template.h"
+
+#define MC_TDB_UTXO_SET_WINDOW_SIZE        20
 
 int64_t GetAdjustedTime();
+void TxToJSON(const CTransaction& tx, const uint256 hashBlock, Object& entry);
+bool CBitcoinAddressFromTxEntity(CBitcoinAddress &address,mc_TxEntity *lpEntity);
 
 using namespace std;
+
+
+void WalletTxNotify(mc_TxImport *imp,const CWalletTx& tx,int block,bool fFound,uint256 block_hash)
+{
+//    std::string strNotifyCmd = GetArg("-walletnotify", "");
+    std::string strNotifyCmd = GetArg("-walletnotify", fFound ? "" : GetArg("-walletnotifynew", ""));
+    if ( strNotifyCmd.empty() )
+    {
+        return;
+    }
+    if(imp->m_ImportID)
+    {
+        return;        
+    }
+
+    boost::replace_all(strNotifyCmd, "%s", tx.GetHash().ToString());
+
+    boost::replace_all(strNotifyCmd, "%c", strprintf("%d",fFound ? 0 : 1));
+    boost::replace_all(strNotifyCmd, "%n", strprintf("%d",block));
+    boost::replace_all(strNotifyCmd, "%b", block_hash.ToString());
+    boost::replace_all(strNotifyCmd, "%h", EncodeHexTx(*static_cast<const CTransaction*>(&tx)));
+
+    string strAddresses="";
+    string strEntities="";
+    CBitcoinAddress address;
+    mc_EntityDetails entity;
+    uint256 txid;
+    
+    for(int i=0;i<imp->m_TmpEntities->GetCount();i++)
+    {
+        mc_TxEntity *lpent;
+        lpent=(mc_TxEntity *)imp->m_TmpEntities->GetRow(i);
+        if(lpent->m_EntityType & MC_TET_CHAINPOS)
+        {
+            switch(lpent->m_EntityType & MC_TET_TYPE_MASK)
+            {
+                case MC_TET_PUBKEY_ADDRESS:
+                case MC_TET_SCRIPT_ADDRESS:
+                    if(CBitcoinAddressFromTxEntity(address,lpent))
+                    {
+                        if(strAddresses.size())
+                        {
+                            strAddresses += ",";
+                        }
+                        strAddresses += address.ToString();
+                    }
+                    break;
+                case MC_TET_STREAM:
+                case MC_TET_ASSET:
+                    if(mc_gState->m_Assets->FindEntityByShortTxID(&entity,lpent->m_EntityID))
+                    {
+                        if(strEntities.size())
+                        {
+                            strEntities += ",";                            
+                        }        
+                        txid=*(uint256*)entity.GetTxID();
+                        strEntities += txid.ToString();
+                    }
+                    break;
+            }
+        }        
+    }
+
+    boost::replace_all(strNotifyCmd, "%a", (strAddresses.size() > 0) ? strAddresses : "\"\"");
+    boost::replace_all(strNotifyCmd, "%e", (strEntities.size() > 0) ? strEntities : "\"\"");
+
+    string str=strprintf("%s",mc_gState->m_NetworkParams->Name());              
+    boost::replace_all(str, "\"", "\\\"");        
+    boost::replace_all(strNotifyCmd, "%m", "\"" + str + "\"");
+    
+// If chain name (retrieved by %m) contains %j, it will be replaced by full JSON. 
+// It is minor issue, but one should be careful when adding other "free text" specifications
+    
+    Object result;
+    TxToJSON(tx, block_hash, result);        
+    str=write_string(Value(result),false);
+    boost::replace_all(str, "\"", "\\\"");        
+    boost::replace_all(strNotifyCmd, "%j", "\"" + str + "\"");
+    
+    boost::thread t(runCommand, strNotifyCmd); // thread runs free        
+}
 
 void mc_Coin::Zero()
 {
@@ -63,6 +158,23 @@ bool mc_Coin::IsTrusted() const
     return (m_Flags & MC_TFL_ALL_INPUTS_FROM_ME) > 0;
 }
 
+bool mc_Coin::IsTrustedNoDepth() const
+{
+    if (!IsFinal())
+    {
+        return false;
+    }
+    
+    int nDepth=GetDepthInMainChain();
+
+    if (nDepth < 0)
+    {
+        return false;
+    }
+
+    return (m_Flags & MC_TFL_ALL_INPUTS_FROM_ME) > 0;
+}
+
 int mc_Coin::GetDepthInMainChain() const
 {
     int nDepth=0;
@@ -96,7 +208,10 @@ void mc_WalletTxs::Zero()
 {
     int i;
     m_Database=NULL;
+    m_ChunkDB=NULL;
+    m_ChunkCollector=NULL;
     m_lpWallet=NULL;
+    m_ChunkBuffer=NULL;
     for(i=0;i<MC_TDB_MAX_IMPORTS;i++)
     {
         m_UTXOs[i].clear();
@@ -109,6 +224,19 @@ void mc_WalletTxs::BindWallet(CWallet *lpWallet)
     m_lpWallet=lpWallet;    
 }
 
+string mc_WalletTxs::Summary()
+{
+    if(m_Database->m_Imports->m_Block != m_Database->m_DBStat.m_Block)
+    {
+        LogPrintf("wtxs: ERROR! Wallet block count mismatch: %d -> %d\n",m_Database->m_Imports->m_Block != m_Database->m_DBStat.m_Block);
+    }
+    return strprintf("Block: %d, Txs: %d, Unconfirmed: %d, UTXOs: %d",
+            m_Database->m_Imports->m_Block,
+            (int)m_Database->m_DBStat.m_Count,
+            (int)m_UnconfirmedSends.size(),
+            (int)m_UTXOs[0].size());
+}
+
 
 int mc_WalletTxs::Initialize(
           const char *name,  
@@ -116,12 +244,27 @@ int mc_WalletTxs::Initialize(
 {
     int err,i;
     
+    m_ChunkDB=new mc_ChunkDB;
+
+    err=m_ChunkDB->Initialize(name,mode);
+
+    if(err)
+    {
+        return err;
+    }
+    
+    m_ChunkCollector=new mc_ChunkCollector;
+    
+    err=m_ChunkCollector->Initialize(m_ChunkDB,name,mode);
+    if(err)
+    {
+        return err;
+    }   
     
     m_Database=new mc_TxDB;
-    
     m_Mode=mode;
     err=m_Database->Initialize(name,mode);
-    
+            
     if(err == MC_ERR_NOERROR)
     {
         m_Mode=m_Database->m_DBStat.m_InitMode;
@@ -140,18 +283,65 @@ int mc_WalletTxs::Initialize(
     
     if(err == MC_ERR_NOERROR)
     {
-        m_UnconfirmedSends= GetUnconfirmedSends(m_Database->m_DBStat.m_Block);
+//        m_UnconfirmedSends= GetUnconfirmedSends(m_Database->m_DBStat.m_Block,m_UnconfirmedSendsHashes);
+        m_UnconfirmedSends.clear();
+        m_UnconfirmedSendsHashes.clear();
+        if(m_Database->m_DBStat.m_Block > 0)                                    // If node crashed during commit we may want to reload unconfirmed txs of the previous block    
+        {
+            LoadUnconfirmedSends(m_Database->m_DBStat.m_Block,m_Database->m_DBStat.m_Block-1);            
+        }
+        LoadUnconfirmedSends(m_Database->m_DBStat.m_Block,m_Database->m_DBStat.m_Block);
     }    
+    
+    m_ChunkBuffer=(unsigned char*)mc_New(MAX_CHUNK_SIZE);
     return err;
+}
+
+int mc_WalletTxs::UpdateMode(uint32_t mode)
+{
+    m_Mode |= mode;
+    if(m_Database)
+    {
+        return m_Database->UpdateMode(mode);
+    }
+    
+    return MC_ERR_INTERNAL_ERROR;
+}
+    
+
+
+int mc_WalletTxs::SetMode(uint32_t mode, uint32_t mask)
+{
+    m_Mode &= ~mask;
+    m_Mode |= mode;
+    
+    return MC_ERR_NOERROR;
 }
 
 int mc_WalletTxs::Destroy()
 {
+    
     if(m_Database)
     {
         delete m_Database;
     }
 
+    if(m_ChunkCollector)
+    {
+        m_ChunkCollector->Commit();
+        delete m_ChunkCollector;
+    }    
+    
+    if(m_ChunkDB)
+    {
+        m_ChunkDB->Commit(-1);
+        delete m_ChunkDB;
+    }
+
+    if(m_ChunkBuffer)
+    {
+        mc_Delete(m_ChunkBuffer);
+    }
     Zero();
     return MC_ERR_NOERROR;    
     
@@ -185,8 +375,22 @@ int mc_WalletTxs::AddEntity(mc_TxEntity *entity,uint32_t flags)
         return MC_ERR_INTERNAL_ERROR;
     }
     m_Database->Lock(1,0);
-    err=m_Database->AddEntity(entity,flags);
+    err=m_Database->AddEntity(entity,flags);    
     m_Database->UnLock();
+    
+    if(err == MC_ERR_NOERROR)
+    {
+        if(mc_gState->m_Features->Chunks())
+        {
+            switch(entity->m_EntityType & MC_TET_TYPE_MASK)
+            {
+                case MC_TET_STREAM:
+                    err=m_ChunkDB->AddEntity(entity,flags);
+                    break;
+            }
+        }
+    }
+    
     return err;
 }
 
@@ -277,7 +481,7 @@ int mc_WalletTxs::BeforeCommit(mc_TxImport *import)
         LogPrintf("wtxs: BeforeCommit: Error: %d\n",err);       
         m_Database->Dump("Error in BeforeCommit");
     }
-    LogPrint("wallet","wtxs: BeforeCommit: Import: %d, Block: %d\n",imp->m_ImportID,imp->m_Block);
+    if(fDebug)LogPrint("wallet","wtxs: BeforeCommit: Import: %d, Block: %d\n",imp->m_ImportID,imp->m_Block);
     
     m_Database->UnLock();
     return err;    
@@ -312,6 +516,20 @@ int mc_WalletTxs::Commit(mc_TxImport *import)
     {        
         imp=import;
     }    
+    if(mc_gState->m_Features->Chunks())
+    {
+        if(imp->m_ImportID == 0)
+        {
+            if(err == MC_ERR_NOERROR)
+            {
+                err=m_ChunkDB->Commit(imp->m_Block+1);
+            }
+            if(m_ChunkCollector)
+            {
+                err=m_ChunkCollector->Commit();
+            }                
+        }
+    }    
     m_Database->Lock(1,0);
     
     if(err == MC_ERR_NOERROR)
@@ -328,24 +546,55 @@ int mc_WalletTxs::Commit(mc_TxImport *import)
     {
         if(imp->m_ImportID == 0)
         {
-            std::map<uint256,CWalletTx> mapUnconfirmed= GetUnconfirmedSends(m_Database->m_DBStat.m_Block-1);// Confirmed txs are filtered out
             m_UnconfirmedSends.clear();
-            LogPrint("wallet","wtxs: Unconfirmed wallet transactions: %d\n",mapUnconfirmed.size());
-            for (map<uint256,CWalletTx>::const_iterator it = mapUnconfirmed.begin(); it != mapUnconfirmed.end(); ++it)
+            m_UnconfirmedSendsHashes.clear();
+            LoadUnconfirmedSends(m_Database->m_DBStat.m_Block,m_Database->m_DBStat.m_Block-1);
+/*            
+            std::vector<uint256> vUnconfirmedHashes;
+            std::map<uint256,CWalletTx> mapUnconfirmed= GetUnconfirmedSends(m_Database->m_DBStat.m_Block-1,vUnconfirmedHashes);// Confirmed txs are filtered out
+//            for (map<uint256,CWalletTx>::const_iterator it = mapUnconfirmed.begin(); it != mapUnconfirmed.end(); ++it)            
+            BOOST_FOREACH(const uint256& hash, vUnconfirmedHashes) 
             {
-                AddToUnconfirmedSends(m_Database->m_DBStat.m_Block,it->second);
+                std::map<uint256,CWalletTx>::const_iterator it = mapUnconfirmed.find(hash);
+                if (it != mapUnconfirmed.end())
+                {                
+                    AddToUnconfirmedSends(m_Database->m_DBStat.m_Block,it->second);
+                }
             }
+ */ 
+            if(fDebug)LogPrint("wallet","wtxs: Unconfirmed wallet transactions: %d\n",m_UnconfirmedSends.size());
         }
     }
        
+    FlushUnconfirmedSends(m_Database->m_DBStat.m_Block);
+    
     if(err)
     {
         LogPrintf("wtxs: Commit: Error: %d\n",err);        
         m_Database->Dump("Error in Commit");
     }
-    LogPrint("wallet","wtxs: Commit: Import: %d, Block: %d\n",imp->m_ImportID,imp->m_Block);
+    if(fDebug)LogPrint("wallet","wtxs: Commit: Import: %d, Block: %d\n",imp->m_ImportID,imp->m_Block);
     m_Database->UnLock();
     return err;        
+}
+
+int mc_WalletTxs::LoadUnconfirmedSends(int block,int file_block)
+{
+    std::vector<uint256> vUnconfirmedHashes;
+    std::map<uint256,CWalletTx> mapUnconfirmed= GetUnconfirmedSends(file_block,vUnconfirmedHashes);// Confirmed txs are filtered out
+    BOOST_FOREACH(const uint256& hash, vUnconfirmedHashes) 
+    {
+        std::map<uint256,CWalletTx>::const_iterator it = mapUnconfirmed.find(hash);
+        if (it != mapUnconfirmed.end())
+        {                
+            std::map<uint256,CWalletTx>::const_iterator it1 = m_UnconfirmedSends.find(hash);
+            if (it1 == m_UnconfirmedSends.end())
+            {                
+                AddToUnconfirmedSends(block,it->second);
+            }
+        }
+    }
+    return MC_ERR_NOERROR;
 }
 
 /*
@@ -379,12 +628,15 @@ int mc_WalletTxs::CleanUpAfterBlock(mc_TxImport *import,int block,int prev_block
     }    
      
     m_Database->Lock(1,0);
-    RemoveUTXOMap(imp->m_ImportID,prev_block);
-    if(imp->m_ImportID == 0)
+    if(prev_block-MC_TDB_UTXO_SET_WINDOW_SIZE >= 0)
     {
-        RemoveUnconfirmedSends(prev_block);
+        RemoveUTXOMap(imp->m_ImportID,prev_block-MC_TDB_UTXO_SET_WINDOW_SIZE);
+        if(imp->m_ImportID == 0)
+        {
+            RemoveUnconfirmedSends(prev_block-MC_TDB_UTXO_SET_WINDOW_SIZE);
+        }
     }
-    LogPrint("wallet","wtxs: CleanUpAfterBlock: Import: %d, Block: %d\n",imp->m_ImportID,imp->m_Block);
+    if(fDebug)LogPrint("wallet","wtxs: CleanUpAfterBlock: Import: %d, Block: %d\n",imp->m_ImportID,imp->m_Block);
     m_Database->UnLock();
     
     return err;
@@ -522,36 +774,42 @@ int mc_WalletTxs::RollBackSubKeys(mc_TxImport *import,int block,mc_TxEntityStat 
 
                             mc_gState->m_TmpScript->Clear();
                             mc_gState->m_TmpScript->SetScript((unsigned char*)(&pc1[0]),(size_t)(script1.end()-pc1),MC_SCR_TYPE_SCRIPTPUBKEY);
-                            if( (mc_gState->m_TmpScript->IsOpReturnScript() != 0 ) && (mc_gState->m_TmpScript->GetNumElements() == 3) )
+                            mc_gState->m_TmpScript->ExtractAndDeleteDataFormat(NULL);
+                            if( (mc_gState->m_TmpScript->IsOpReturnScript() != 0 ) && (mc_gState->m_TmpScript->GetNumElements() >= 3) )
                             {
+                                mc_gState->m_TmpScript->DeleteDuplicatesInRange(1,mc_gState->m_TmpScript->GetNumElements()-1);
                                 unsigned char short_txid[MC_AST_SHORT_TXID_SIZE];
                                 mc_gState->m_TmpScript->SetElement(0);
 
                                 if( (mc_gState->m_TmpScript->GetEntity(short_txid) == 0) &&           
                                     (memcmp(short_txid,parent_entity->m_Entity.m_EntityID,MC_AST_SHORT_TXID_SIZE) == 0) )    
                                 {
-                                    mc_gState->m_TmpScript->SetElement(1);
-                                    if(mc_gState->m_TmpScript->GetItemKey(item_key,&item_key_size))   // Item key
-                                    {
-                                        err=MC_ERR_INTERNAL_ERROR;
-                                        goto exitlbl;                                                                                                                                        
-                                    }                    
-
-                                    subkey_hash160=Hash160(item_key,item_key+item_key_size);
-                                    mc_GetCompoundHash160(&stream_subkey_hash160,parent_entity->m_Entity.m_EntityID,&subkey_hash160);
-
                                     entity.Zero();
                                     memcpy(entity.m_EntityID,short_txid,MC_AST_SHORT_TXID_SIZE);
                                     entity.m_EntityType=MC_TET_STREAM_KEY | MC_TET_CHAINPOS;
-                                    subkey_entity.Zero();
-                                    memcpy(subkey_entity.m_EntityID,&stream_subkey_hash160,MC_TDB_ENTITY_ID_SIZE);
-                                    subkey_entity.m_EntityType=MC_TET_SUBKEY_STREAM_KEY | MC_TET_CHAINPOS;
-                                    err= m_Database->DecrementSubKey(imp,&entity,&subkey_entity);
-                                    if(err)
+                                    
+                                    for(int e=mc_gState->m_TmpScript->GetNumElements()-2;e>=1;e--)
                                     {
-                                        goto exitlbl;
+                                        mc_gState->m_TmpScript->SetElement(e);
+                                        if(mc_gState->m_TmpScript->GetItemKey(item_key,&item_key_size))   // Item key
+                                        {
+                                            err=MC_ERR_INTERNAL_ERROR;
+                                            goto exitlbl;                                                                                                                                        
+                                        }                    
+
+                                        subkey_hash160=Hash160(item_key,item_key+item_key_size);
+                                        mc_GetCompoundHash160(&stream_subkey_hash160,parent_entity->m_Entity.m_EntityID,&subkey_hash160);
+
+                                        subkey_entity.Zero();
+                                        memcpy(subkey_entity.m_EntityID,&stream_subkey_hash160,MC_TDB_ENTITY_ID_SIZE);
+                                        subkey_entity.m_EntityType=MC_TET_SUBKEY_STREAM_KEY | MC_TET_CHAINPOS;
+                                        err= m_Database->DecrementSubKey(imp,&entity,&subkey_entity);
+                                        if(err)
+                                        {
+                                            goto exitlbl;
+                                        }
                                     }
-                            
+                                    
                                     publishers_set.clear();
                                     for (j = 0; j < (int)wtx.vin.size(); ++j)
                                     {
@@ -638,6 +896,7 @@ int mc_WalletTxs::RollBack(mc_TxImport *import,int block)
     mc_Buffer *lpSubKeyEntRowBuffer;
     bool fInBlocks;   
     std::vector<mc_Coin> txouts;
+    std::vector<uint256> removed_coinbases;
     
     if((m_Mode & MC_WMD_TXS) == 0)
     {
@@ -698,7 +957,8 @@ int mc_WalletTxs::RollBack(mc_TxImport *import,int block)
     {
         if(imp->m_ImportID == 0)                                                // Copying conflicted transactions, they may become valid and should be rechecked
         {
-            std::map<uint256,CWalletTx> mapUnconfirmed= GetUnconfirmedSends(m_Database->m_DBStat.m_Block);
+            std::vector<uint256> vUnconfirmedHashes;
+            std::map<uint256,CWalletTx> mapUnconfirmed= GetUnconfirmedSends(m_Database->m_DBStat.m_Block,vUnconfirmedHashes);
             for (map<uint256,CWalletTx>::const_iterator it = mapUnconfirmed.begin(); it != mapUnconfirmed.end(); ++it)
             {
                 m_Database->GetTx(&txdef,(unsigned char*)&(it->first));
@@ -792,7 +1052,16 @@ int mc_WalletTxs::RollBack(mc_TxImport *import,int block)
                                                         {
                                                             memcpy(&(txout.m_EntityID),entity.m_EntityID,MC_TDB_ENTITY_ID_SIZE);
                                                             txout.m_EntityType=entity.m_EntityType;
-                                                            isminefilter mine = m_lpWallet ? IsMine(*m_lpWallet, dest) : ISMINE_NO;
+                                                            isminefilter mine;
+                                                            if(entity.m_EntityType & MC_TET_PUBKEY_ADDRESS)
+                                                            {
+                                                                mine = m_lpWallet ? IsMineKeyID(*m_lpWallet, *lpKeyID) : ISMINE_NO;
+                                                            }
+                                                            else
+                                                            {
+                                                                mine = m_lpWallet ? IsMineScriptID(*m_lpWallet, *lpScriptID) : ISMINE_NO;                                                                
+                                                            }
+//                                                            isminefilter mine = m_lpWallet ? IsMine(*m_lpWallet, dest) : ISMINE_NO;
                                                             if(mine & ISMINE_SPENDABLE) //Spendable flag is used to avoid IsMine calculation in coin selection
                                                             {
                                                                 txout.m_Flags |= MC_TFL_IS_SPENDABLE;
@@ -880,7 +1149,11 @@ int mc_WalletTxs::RollBack(mc_TxImport *import,int block)
                                         }
                                     }
                                 }                                
-                                LogPrint("wallet","wtxs: Removing tx %s, block %d, flags: %08X, import %d\n",hash.ToString().c_str(),entrow->m_Block,entrow->m_Flags,imp->m_ImportID);
+                                if(fDebug)LogPrint("wallet","wtxs: Removing tx %s, block %d, flags: %08X, import %d\n",hash.ToString().c_str(),entrow->m_Block,entrow->m_Flags,imp->m_ImportID);
+                                if(wtx.IsCoinBase())
+                                {
+                                    removed_coinbases.push_back(hash);
+                                }
                             }
                         }
                         else
@@ -932,13 +1205,18 @@ int mc_WalletTxs::RollBack(mc_TxImport *import,int block)
     if(err == MC_ERR_NOERROR)
     {
         err=m_Database->RollBack(import,block);                                 // Database rollback    
+        for(i=0;i<(int)removed_coinbases.size();i++)
+        {
+            uint256 hash=removed_coinbases[i];
+            m_Database->SaveTxFlag((unsigned char*)&hash,MC_TFL_INVALID,1);
+        }
     }
     if(err)
     {
         LogPrintf("wtxs: RollBack: Error: %d\n",err);        
         m_Database->Dump("Error in RollBack");
     }
-    LogPrint("wallet","wtxs: RollBack: Import: %d, Block: %d\n",imp->m_ImportID,imp->m_Block);
+    if(fDebug)LogPrint("wallet","wtxs: RollBack: Import: %d, Block: %d\n",imp->m_ImportID,imp->m_Block);
     m_Database->UnLock();
     return err;            
 }
@@ -995,6 +1273,16 @@ int mc_WalletTxs::GetList(mc_TxEntity *entity,int generation,int from,int count,
     return err;            
 }
 
+int mc_WalletTxs::GetBlockItemIndex(mc_TxEntity *entity, int block)
+{
+    int res;
+    m_Database->Lock(0,0);
+    res=m_Database->GetBlockItemIndex(NULL,entity,block);
+    m_Database->UnLock();
+    return res;            
+}
+
+
 int mc_WalletTxs::GetListSize(mc_TxEntity *entity,int *confirmed)
 {
     int res;
@@ -1029,9 +1317,9 @@ int mc_WalletTxs::GetListSize(mc_TxEntity *entity,int generation,int *confirmed)
     return res;                
 }
 
-int mc_WalletTxs::Unsubscribe(mc_Buffer* lpEntities)
+int mc_WalletTxs::Unsubscribe(mc_Buffer* lpEntities,bool purge)
 {
-    int err;
+    int err,j;
     if((m_Mode & MC_WMD_TXS) == 0)
     {
         return MC_ERR_NOT_SUPPORTED;
@@ -1042,8 +1330,29 @@ int mc_WalletTxs::Unsubscribe(mc_Buffer* lpEntities)
     }
     m_Database->Lock(1,0);    
     err=m_Database->Unsubscribe(lpEntities);
-    LogPrint("wallet","wtxs: Unsubscribed from %d entities\n",lpEntities->GetCount());
+    if(err==MC_ERR_NOERROR)
+    {
+        if(mc_gState->m_Features->Chunks())
+        {
+            if(purge)
+            {
+                if(m_ChunkDB)
+                {
+                    for(j=0;j<lpEntities->GetCount();j++)                                       
+                    {
+                        m_ChunkDB->RemoveEntity((mc_TxEntity*)lpEntities->GetRow(j),NULL,NULL);
+                    }
+                }
+            }
+        }
+    }
+    if(fDebug)LogPrint("wallet","wtxs: Unsubscribed from %d entities\n",lpEntities->GetCount());
     m_Database->UnLock();
+    
+    if(m_ChunkCollector)
+    {
+        m_ChunkCollector->Unsubscribe(lpEntities);
+    }
     return err;                        
 }
 
@@ -1066,7 +1375,7 @@ mc_TxImport *mc_WalletTxs::StartImport(mc_Buffer *lpEntities,int block,int *err)
     {
         m_UTXOs[imp-m_Database->m_Imports].clear();
     }
-    LogPrint("wallet","wtxs: StartImport: Import: %d, Block: %d\n",imp->m_ImportID,imp->m_Block);
+    if(fDebug)LogPrint("wallet","wtxs: StartImport: Import: %d, Block: %d\n",imp->m_ImportID,imp->m_Block);
     m_Database->UnLock();
     return imp;                
 }
@@ -1106,7 +1415,7 @@ int mc_WalletTxs::ImportGetBlock(mc_TxImport *import)
     
 }
 
-int mc_WalletTxs::CompleteImport(mc_TxImport *import)
+int mc_WalletTxs::CompleteImport(mc_TxImport *import,uint32_t flags)
 {
     int err,import_pos,gen,count;
     
@@ -1124,7 +1433,7 @@ int mc_WalletTxs::CompleteImport(mc_TxImport *import)
     
     gen=import->m_ImportID;
     
-    err=m_Database->CompleteImport(import);
+    err=m_Database->CompleteImport(import,flags);
     
                                                                                 
     if(m_Database->m_DBStat.m_Block != m_Database->m_Imports->m_Block)
@@ -1210,7 +1519,7 @@ int mc_WalletTxs::CompleteImport(mc_TxImport *import)
     {
         LogPrintf("wtxs: CompleteImport: Error: %d\n",err);        
     }
-    LogPrint("wallet","wtxs: CompleteImport: Import: %d, Block: %d\n",gen,m_Database->m_DBStat.m_Block);
+    if(fDebug)LogPrint("wallet","wtxs: CompleteImport: Import: %d, Block: %d\n",gen,m_Database->m_DBStat.m_Block);
     m_Database->UnLock();
     return err;                
 }
@@ -1234,9 +1543,41 @@ int mc_WalletTxs::DropImport(mc_TxImport *import)
     {
         RemoveUTXOMap(import->m_ImportID,import->m_Block);        
     }
-    LogPrint("wallet","wtxs: DropImport: Import: %d, Block: %d\n",gen,m_Database->m_DBStat.m_Block);
+    if(fDebug)LogPrint("wallet","wtxs: DropImport: Import: %d, Block: %d\n",gen,m_Database->m_DBStat.m_Block);
     m_Database->UnLock();
     return err;                    
+}
+
+int mc_WalletTxs::FlushUnconfirmedSends(int block)
+{
+    FILE* fHan;
+    char ShortName[65];                                     
+    char FileName[MC_DCT_DB_MAX_PATH];                      
+    uint256 hash;
+    
+    if((m_Mode & MC_WMD_TXS) == 0)
+    {
+        return MC_ERR_NOT_SUPPORTED;
+    }    
+    if(m_Database == NULL)
+    {
+        return MC_ERR_INTERNAL_ERROR;
+    }
+
+    sprintf(ShortName,"wallet/uncsend_%d",block);
+
+    mc_GetFullFileName(m_Database->m_Name,ShortName,".dat",MC_FOM_RELATIVE_TO_DATADIR | MC_FOM_CREATE_DIR,FileName);
+    fHan=fopen(FileName,"ab+");
+    
+    if(fHan == NULL)
+    {
+        return MC_ERR_FILE_WRITE_ERROR;
+    }
+    
+    FileCommit(fHan);                                                           
+    fclose(fHan);    
+    
+    return MC_ERR_NOERROR;
 }
 
 int mc_WalletTxs::AddToUnconfirmedSends(int block, const CWalletTx& tx)
@@ -1244,6 +1585,7 @@ int mc_WalletTxs::AddToUnconfirmedSends(int block, const CWalletTx& tx)
     FILE* fHan;
     char ShortName[65];                                     
     char FileName[MC_DCT_DB_MAX_PATH];                      
+    uint256 hash;
     
     if((m_Mode & MC_WMD_TXS) == 0)
     {
@@ -1269,7 +1611,11 @@ int mc_WalletTxs::AddToUnconfirmedSends(int block, const CWalletTx& tx)
     
     fileout << tx;
 
-    m_UnconfirmedSends.insert(make_pair(tx.GetHash(), tx));
+    hash=tx.GetHash();
+    m_UnconfirmedSends.insert(make_pair(hash, tx));
+    m_UnconfirmedSendsHashes.push_back(hash);
+    
+//    FileCommit(fHan);                                                           // If we not do it, in the worst case we'll lose some transactions
     
     return MC_ERR_NOERROR;
 }
@@ -1298,7 +1644,7 @@ int mc_WalletTxs::SaveTxFlag(const unsigned char *hash,uint32_t flag,int set_fla
     return err;
 }
 
-std::map<uint256,CWalletTx> mc_WalletTxs::GetUnconfirmedSends(int block)
+std::map<uint256,CWalletTx> mc_WalletTxs::GetUnconfirmedSends(int block,std::vector<uint256>& unconfirmedSendsHashes)
 {
     map<uint256,CWalletTx> outMap;
     char ShortName[65];                                     
@@ -1338,6 +1684,7 @@ std::map<uint256,CWalletTx> mc_WalletTxs::GetUnconfirmedSends(int block)
                 if (it == outMap.end())
                 {
                     outMap.insert(make_pair(hash, wtx));                
+                    unconfirmedSendsHashes.push_back(hash);
                 }            
             }
         } 
@@ -1444,6 +1791,7 @@ int mc_WalletTxs::SaveUTXOMap(int import_id,int block)
         fileout << it->second;        
     }
 
+    FileCommit(fHan);
     
     return MC_ERR_NOERROR;
 }
@@ -1452,6 +1800,7 @@ int mc_WalletTxs::LoadUTXOMap(int import_id,int block)
 {
     char ShortName[65];                                     
     char FileName[MC_DCT_DB_MAX_PATH];                      
+    FILE *fHan;
     int import_pos;
     bool fHaveUtxo;
     map<COutPoint, mc_Coin> mapOut;
@@ -1477,7 +1826,18 @@ int mc_WalletTxs::LoadUTXOMap(int import_id,int block)
 
     mc_GetFullFileName(m_Database->m_Name,ShortName,".dat",MC_FOM_RELATIVE_TO_DATADIR | MC_FOM_CREATE_DIR, FileName);
     
-    CAutoFile filein(fopen(FileName,"rb+"), SER_DISK, CLIENT_VERSION);
+    fHan=fopen(FileName,"rb+");
+    
+    if(fHan == NULL)
+    {
+        LogPrintf("wtxs: Cannot open unspent outputs file\n");
+        if(block > 0)
+        {
+            return MC_ERR_NOERROR;
+        }
+    }
+    
+    CAutoFile filein(fHan, SER_DISK, CLIENT_VERSION);
     
     fHaveUtxo=true;
     while(fHaveUtxo)
@@ -1496,7 +1856,7 @@ int mc_WalletTxs::LoadUTXOMap(int import_id,int block)
     
     m_UTXOs[import_pos]=mapOut;
     
-    LogPrint("wallet","wtxs: Loaded %u unspent outputs for import %d\n",m_UTXOs[import_pos].size(),import_pos);
+    if(fDebug)LogPrint("wallet","wtxs: Loaded %u unspent outputs for import %d\n",m_UTXOs[import_pos].size(),import_pos);
             
     return MC_ERR_NOERROR;
 }
@@ -1580,8 +1940,23 @@ CWalletTx mc_WalletTxChoppedCopy(CWallet *lpWallet,const CWalletTx& tx)
     return wtx;
 }
 
+void mc_WalletCachedSubKey::Set(mc_TxEntity* entity,mc_TxEntity* subkey_entity,uint160 subkey_hash,uint32_t flags)
+{
+    memcpy(&m_Entity,entity,sizeof(mc_TxEntity));
+    memcpy(&m_SubkeyEntity,subkey_entity,sizeof(mc_TxEntity));
+    m_SubKeyHash=subkey_hash;
+    m_Flags=flags;    
+}
 
-int mc_WalletTxs::AddTx(mc_TxImport *import,const CTransaction& tx,int block,CDiskTxPos* block_pos,uint32_t block_tx_index)
+void mc_WalletCachedSubKey::Zero()
+{
+    m_Entity.Zero();
+    m_SubkeyEntity.Zero();
+    m_SubKeyHash=0;
+    m_Flags=0;
+}
+
+int mc_WalletTxs::AddTx(mc_TxImport *import,const CTransaction& tx,int block,CDiskTxPos* block_pos,uint32_t block_tx_index,uint256 block_hash)
 {
     if((m_Mode & MC_WMD_TXS) == 0)
     {
@@ -1589,12 +1964,12 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CTransaction& tx,int block,CDi
     }    
     CWalletTx wtx(m_lpWallet,tx);
     
-    return AddTx(import,wtx,block,block_pos,block_tx_index);
+    return AddTx(import,wtx,block,block_pos,block_tx_index,block_hash);
 }
 
-int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskTxPos* block_pos,uint32_t block_tx_index)
+int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskTxPos* block_pos,uint32_t block_tx_index,uint256 block_hash)
 {
-    int err,i,j,entcount,lockres,entpos;
+    int err,i,j,entcount,lockres,entpos,base_row;
     mc_TxImport *imp;
     mc_TxEntity entity;
     mc_TxEntity subkey_entity;
@@ -1602,6 +1977,9 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
     mc_TxEntity input_entity;
     mc_TxEntity *lpent;
     mc_TxDefRow txdef;
+    mc_TxEntityRowExtension extension;
+    mc_TxEntityRowExtension *lpext;
+    
     const CWalletTx *fullTx;
     const CWalletTx *storedTx;
     CWalletTx stx;
@@ -1611,6 +1989,7 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
     uint160 subkey_hash160;
     uint160 stream_subkey_hash160;
     set<uint160> publishers_set;
+    map<uint160,int> subkey_count_map;
     
     int import_pos;
     bool fFound;
@@ -1628,6 +2007,7 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
     std::vector<mc_Coin> txoutsOut;
     uint256 hash;
     unsigned char *ptrOut;
+    bool fAlreadyInTheWalletForNotify;   
     
     uint32_t txsize;
     uint32_t txfullsize;
@@ -1659,11 +2039,19 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
     
     fFound=false;
     txdef.Zero();
+    
+    m_Database->SetTxCache((unsigned char*)&hash);
+    if(m_Database->m_TxCachedFlags == MC_TCF_FOUND)
+    {
+        fFound=true;
+        memcpy(&txdef,&(m_Database->m_TxCachedDef),sizeof(mc_TxDefRow));
+    }
+/*    
     if(m_Database->GetTx(&txdef,(unsigned char*)&hash) == MC_ERR_NOERROR)
     {
         fFound=true;        
     }
-    
+*/    
     if(!fFound)
     {
         for(i=0;i<(int)tx.vout.size();i++)                                      // Checking that tx has long OP_RETURN
@@ -1744,28 +2132,27 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
                 int nRequiredRet;
                 std::vector<CTxDestination> addressRets;
 
-                if(!ExtractDestinations(script1,typeRet,addressRets,nRequiredRet))
-                {
-                    err=MC_ERR_CORRUPTED;                
-                    goto exitlbl;
-                }            
+                ExtractDestinations(script1,typeRet,addressRets,nRequiredRet);
 
                 BOOST_FOREACH(const CTxDestination& dest, addressRets)
                 {
                     entity.Zero();
                     const CKeyID *lpKeyID=boost::get<CKeyID> (&dest);
                     const CScriptID *lpScriptID=boost::get<CScriptID> (&dest);
+                    isminefilter mine=ISMINE_NO;
                     if(lpKeyID)
                     {
                         memcpy(entity.m_EntityID,lpKeyID,MC_TDB_ENTITY_ID_SIZE);
                         entity.m_EntityType=MC_TET_PUBKEY_ADDRESS | MC_TET_CHAINPOS;
+                        mine = m_lpWallet ? IsMineKeyID(*m_lpWallet, *lpKeyID) : ISMINE_NO;
                     }
                     if(lpScriptID)
                     {
                         memcpy(entity.m_EntityID,lpScriptID,MC_TDB_ENTITY_ID_SIZE);
                         entity.m_EntityType=MC_TET_SCRIPT_ADDRESS | MC_TET_CHAINPOS;
+                        mine = m_lpWallet ? IsMineScriptID(*m_lpWallet, *lpScriptID) : ISMINE_NO;                                                                
                     }
-                    isminefilter mine = IsMine(*m_lpWallet, dest);
+//                    isminefilter mine = IsMine(*m_lpWallet, dest);
                     if((mine & ISMINE_SPENDABLE) == ISMINE_NO)
                     {
                         fAllInputsFromMe=false;
@@ -1876,11 +2263,7 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
             utxo.m_EntityID=0;
             utxo.m_EntityType=MC_TET_NONE;
             utxo.m_LockTime=tx.nLockTime;
-            if(!ExtractDestinations(script1,typeRet,addressRets,nRequiredRet))
-            {
-                err=MC_ERR_CORRUPTED;                
-                goto exitlbl;
-            }            
+            ExtractDestinations(script1,typeRet,addressRets,nRequiredRet);
 
             for (int e = 0; e < mc_gState->m_TmpScript->GetNumElements(); e++)
             {
@@ -1897,19 +2280,22 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
                 entity.Zero();
                 const CKeyID *lpKeyID=boost::get<CKeyID> (&dest);
                 const CScriptID *lpScriptID=boost::get<CScriptID> (&dest);
+                isminefilter mine=ISMINE_NO;
                 if(lpKeyID)
                 {
                     memcpy(entity.m_EntityID,lpKeyID,MC_TDB_ENTITY_ID_SIZE);
                     entity.m_EntityType=MC_TET_PUBKEY_ADDRESS | MC_TET_CHAINPOS;
+                    mine = m_lpWallet ? IsMineKeyID(*m_lpWallet, *lpKeyID) : ISMINE_NO;
                 }
                 if(lpScriptID)
                 {
                     memcpy(entity.m_EntityID,lpScriptID,MC_TDB_ENTITY_ID_SIZE);
                     entity.m_EntityType=MC_TET_SCRIPT_ADDRESS | MC_TET_CHAINPOS;
+                    mine = m_lpWallet ? IsMineScriptID(*m_lpWallet, *lpScriptID) : ISMINE_NO;                                                                
                 }
                 if(entity.m_EntityType)
                 {
-                    isminefilter mine = m_lpWallet ? IsMine(*m_lpWallet, dest) : ISMINE_NO;
+//                    isminefilter mine = m_lpWallet ? IsMine(*m_lpWallet, dest) : ISMINE_NO;
 
                     fOutputIsSpendable=false;
                     if(mine & ISMINE_SPENDABLE)
@@ -1964,8 +2350,17 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
         }
         else
         {
-            if(mc_gState->m_TmpScript->GetNumElements() == 3) // 2 OP_DROPs + OP_RETURN - item key
+            unsigned char *chunk_hashes;
+            unsigned char *chunk_found;
+            int chunk_count,chunk_err;
+            int chunk_size,chunk_shift;
+            size_t chunk_bytes;
+            
+            mc_gState->m_TmpScript->ExtractAndDeleteDataFormat(NULL,&chunk_hashes,&chunk_count,NULL);
+            if(mc_gState->m_TmpScript->GetNumElements() >= 3) // 2 OP_DROPs + OP_RETURN - item key
             {
+                mc_gState->m_TmpScript->DeleteDuplicatesInRange(1,mc_gState->m_TmpScript->GetNumElements()-1);
+                
                 unsigned char short_txid[MC_AST_SHORT_TXID_SIZE];
                 mc_gState->m_TmpScript->SetElement(0);
                                                                             
@@ -1974,47 +2369,160 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
                     entity.Zero();
                     memcpy(entity.m_EntityID,short_txid,MC_AST_SHORT_TXID_SIZE);
                     entity.m_EntityType=MC_TET_STREAM | MC_TET_CHAINPOS;
+                    
+                    bool passed_filters=true;
+
                     if(imp->FindEntity(&entity) >= 0)    
                     {
-                        if(imp->m_TmpEntities->Seek(&entity) < 0)
+                        if( (chunk_hashes != NULL) && 
+                            (pEF->STR_NoRetrieve(&entity) == 0) )
                         {
-                            imp->m_TmpEntities->Add(&entity,NULL);
-                            
-                            mc_gState->m_TmpScript->SetElement(1);
-                            if(mc_gState->m_TmpScript->GetItemKey(item_key,&item_key_size))   // Item key
+                            mc_ChunkDBRow chunk_def;
+                            mc_TxEntity chunk_entity;
+                            chunk_entity.Zero();
+                            memcpy(chunk_entity.m_EntityID,short_txid,MC_AST_SHORT_TXID_SIZE);
+                            chunk_entity.m_EntityType=MC_TET_STREAM;            
+                            for(int chunk=0;chunk<chunk_count;chunk++)
                             {
-                                err=MC_ERR_INTERNAL_ERROR;
-                                goto exitlbl;                                                                                                                                        
+                                chunk_size=(int)mc_GetVarInt(chunk_hashes,MC_CDB_CHUNK_HASH_SIZE+16,-1,&chunk_shift);
+                                chunk_hashes+=chunk_shift;
+                                if(m_ChunkDB->GetChunkDef(&chunk_def,chunk_hashes,&chunk_entity,(unsigned char*)&hash,i) != MC_ERR_NOERROR)
+                                {
+                                    if(m_ChunkDB->GetChunkDef(&chunk_def,chunk_hashes,NULL,NULL,-1) == MC_ERR_NOERROR)
+                                    {
+                                        chunk_found=m_ChunkDB->GetChunk(&chunk_def,0,-1,&chunk_bytes);
+                                        if(chunk_found)
+                                        {
+                                            memcpy(m_ChunkBuffer,chunk_found,chunk_size);
+                                            chunk_err=m_ChunkDB->AddChunk(chunk_hashes,&chunk_entity,(unsigned char*)&hash,i,m_ChunkBuffer,NULL,chunk_size,0,0);
+                                            if(chunk_err)
+                                            {
+                                                err=chunk_err;
+                                                goto exitlbl;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            err=MC_ERR_CORRUPTED;
+                                            goto exitlbl;      
+                                        }
+                                    }
+                                    else
+                                    {
+                                        m_ChunkCollector->InsertChunk(chunk_hashes,&chunk_entity,(unsigned char*)&hash,i,chunk_size);
+                                        // Feeding async chunk retriever here
+                                    }
+                                }
+                                else
+                                {
+                                    m_ChunkDB->RestoreChunkIfNeeded(&chunk_def);
+                                }
+                                
+                                chunk_hashes+=MC_CDB_CHUNK_HASH_SIZE;
+                            }
+                        }
+/*                        
+                        else
+                        {
+                            mc_MultiChainFilter* lpFilter;
+                            int applied=0;
+                            string filter_error;
+                            int filter_block=-1;
+                            int filter_offset=0;
+                            if(block >= 0)
+                            {
+                                filter_block=block;
+                                filter_offset=block_pos->nTxOffset;
+                            }
+                            else
+                            {
+                                if( imp->m_ImportID > 0 )
+                                {
+                                    filter_offset=-1;                                    
+                                }
+                            }
+                            if(pMultiChainFilterEngine->RunStreamFilters(tx,i,entity.m_EntityID,filter_block, filter_offset, 
+                                    filter_error,&lpFilter,&applied) != MC_ERR_NOERROR)
+                            {
+                                if(fDebug)LogPrint("mchn","mchn: Stream items rejected (%s): %s\n","Error while running filters",EncodeHexTx(tx));
+                                passed_filters=false;
+                            }
+                            else
+                            {
+                                if(filter_error.size())
+                                {
+                                    if(fDebug)LogPrint("mchn","mchn: Rejecting filter: %s\n",lpFilter->m_FilterCaption.c_str());
+                                    if(fDebug)LogPrint("mchn","mchn: Stream items rejected (%s): %s\n",filter_error.c_str(),EncodeHexTx(tx));                                
+                                    passed_filters=false;
+                                }
                             }                    
-
-                            subkey_hash160=Hash160(item_key,item_key+item_key_size);
-                            subkey_hash256=0;
-                            memcpy(&subkey_hash256,&subkey_hash160,sizeof(subkey_hash160));
-                            err=m_Database->AddSubKeyDef(imp,(unsigned char*)&subkey_hash256,item_key,item_key_size,MC_SFL_SUBKEY);
-                            if(err)
+                        }
+*/                            
+//                        if(imp->m_TmpEntities->Seek(&entity) < 0)
+                        if(passed_filters)
+                        {
+                            extension.Zero();
+                            extension.m_Output=i;
+                            base_row=imp->m_TmpEntities->Seek(&entity);
+                            if(base_row >= 0)
                             {
-                                goto exitlbl;
-                            }
-
-                            mc_GetCompoundHash160(&stream_subkey_hash160,entity.m_EntityID,&subkey_hash160);
-                            
-                            entity.m_EntityType=MC_TET_STREAM_KEY | MC_TET_CHAINPOS;
-                            subkey_entity.Zero();
-                            memcpy(subkey_entity.m_EntityID,&stream_subkey_hash160,MC_TDB_ENTITY_ID_SIZE);
-                            subkey_entity.m_EntityType=MC_TET_SUBKEY_STREAM_KEY | MC_TET_CHAINPOS;
-                            err= m_Database->IncrementSubKey(imp,&entity,&subkey_entity,(unsigned char*)&subkey_hash160,(unsigned char*)&hash,block,0,fFound ? 0 : 1);
-                            if(err)
-                            {
-                                goto exitlbl;
+                                lpext=(mc_TxEntityRowExtension*)(imp->m_TmpEntities->GetRow(base_row)+sizeof(mc_TxEntity));
+                                lpext->m_TmpLastCount+=1;
+                                extension.m_Count=lpext->m_TmpLastCount;
                             }
                             
-                            entity.m_EntityType=MC_TET_STREAM_KEY | MC_TET_TIMERECEIVED;
-                            subkey_entity.m_EntityType=MC_TET_SUBKEY_STREAM_KEY | MC_TET_TIMERECEIVED;
-                            err= m_Database->IncrementSubKey(imp,&entity,&subkey_entity,(unsigned char*)&subkey_hash160,(unsigned char*)&hash,block,0,fFound ? 0 : 1);
-                            if(err)
+                            imp->m_TmpEntities->Add(&entity,&extension);
+                            
+                            extension.m_Count=0;
+                            for(int e=1;e<mc_gState->m_TmpScript->GetNumElements()-1;e++)
                             {
-                                goto exitlbl;
-                            }                           
+                                mc_gState->m_TmpScript->SetElement(e);
+                                if(mc_gState->m_TmpScript->GetItemKey(item_key,&item_key_size))   // Item key
+                                {
+                                    err=MC_ERR_INTERNAL_ERROR;
+                                    goto exitlbl;                                                                                                                                        
+                                }                    
+
+                                subkey_hash160=Hash160(item_key,item_key+item_key_size);
+                                subkey_hash256=0;
+                                memcpy(&subkey_hash256,&subkey_hash160,sizeof(subkey_hash160));
+                                err=m_Database->AddSubKeyDef(imp,(unsigned char*)&subkey_hash256,item_key,item_key_size,MC_SFL_SUBKEY);
+                                if(err)
+                                {
+                                    goto exitlbl;
+                                }
+
+                                mc_GetCompoundHash160(&stream_subkey_hash160,entity.m_EntityID,&subkey_hash160);
+
+                                map<uint160,int>::iterator it = subkey_count_map.find(stream_subkey_hash160);
+                                if (it == subkey_count_map.end())
+                                {
+                                    subkey_count_map.insert(make_pair(stream_subkey_hash160,0));
+                                }
+                                else
+                                {
+                                    it->second += 1;
+                                    extension.m_Count=it->second;
+                                }
+                                
+                                entity.m_EntityType=MC_TET_STREAM_KEY | MC_TET_CHAINPOS;
+                                subkey_entity.Zero();
+                                memcpy(subkey_entity.m_EntityID,&stream_subkey_hash160,MC_TDB_ENTITY_ID_SIZE);
+                                subkey_entity.m_EntityType=MC_TET_SUBKEY_STREAM_KEY | MC_TET_CHAINPOS;
+                                err= m_Database->IncrementSubKey(imp,&entity,&subkey_entity,(unsigned char*)&subkey_hash160,(unsigned char*)&hash,&extension,block,0,fFound ? 0 : 1);
+                                if(err)
+                                {
+                                    goto exitlbl;
+                                }
+
+                                entity.m_EntityType=MC_TET_STREAM_KEY | MC_TET_TIMERECEIVED;
+                                subkey_entity.m_EntityType=MC_TET_SUBKEY_STREAM_KEY | MC_TET_TIMERECEIVED;
+                                err= m_Database->IncrementSubKey(imp,&entity,&subkey_entity,(unsigned char*)&subkey_hash160,(unsigned char*)&hash,&extension,block,0,fFound ? 0 : 1);
+                                if(err)
+                                {
+                                    goto exitlbl;
+                                }                           
+                            }
 
                             publishers_set.clear();
                             for (j = 0; j < (int)tx.vin.size(); ++j)
@@ -2050,11 +2558,22 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
                                             
                                             mc_GetCompoundHash160(&stream_subkey_hash160,entity.m_EntityID,&subkey_hash160);
                             
+                                            map<uint160,int>::iterator it = subkey_count_map.find(stream_subkey_hash160);
+                                            if (it == subkey_count_map.end())
+                                            {
+                                                subkey_count_map.insert(make_pair(stream_subkey_hash160,0));
+                                            }
+                                            else
+                                            {
+                                                it->second += 1;
+                                                extension.m_Count=it->second;
+                                            }
+                                            
                                             entity.m_EntityType=MC_TET_STREAM_PUBLISHER | MC_TET_CHAINPOS;
                                             subkey_entity.Zero();
                                             memcpy(subkey_entity.m_EntityID,&stream_subkey_hash160,MC_TDB_ENTITY_ID_SIZE);
                                             subkey_entity.m_EntityType=MC_TET_SUBKEY_STREAM_PUBLISHER | MC_TET_CHAINPOS;
-                                            err= m_Database->IncrementSubKey(imp,&entity,&subkey_entity,(unsigned char*)&subkey_hash160,(unsigned char*)&hash,block,0,fFound ? 0 : 1);
+                                            err= m_Database->IncrementSubKey(imp,&entity,&subkey_entity,(unsigned char*)&subkey_hash160,(unsigned char*)&hash,&extension,block,0,fFound ? 0 : 1);
                                             if(err)
                                             {
                                                 goto exitlbl;
@@ -2062,7 +2581,7 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
                             
                                             entity.m_EntityType=MC_TET_STREAM_PUBLISHER | MC_TET_TIMERECEIVED;
                                             subkey_entity.m_EntityType=MC_TET_SUBKEY_STREAM_PUBLISHER | MC_TET_TIMERECEIVED;
-                                            err= m_Database->IncrementSubKey(imp,&entity,&subkey_entity,(unsigned char*)&subkey_hash160,(unsigned char*)&hash,block,0,fFound ? 0 : 1);
+                                            err= m_Database->IncrementSubKey(imp,&entity,&subkey_entity,(unsigned char*)&subkey_hash160,(unsigned char*)&hash,&extension,block,0,fFound ? 0 : 1);
                                             if(err)
                                             {
                                                 goto exitlbl;
@@ -2095,6 +2614,7 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
                                 {
                                     fNewStream=true;
                                 }
+/*                                
                                 else
                                 {
                                     int chain_row=m_Database->m_Imports->FindEntity(&entity);
@@ -2110,6 +2630,7 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
                                         }
                                     }
                                 }
+ */ 
                             }
                         }
                     }
@@ -2121,25 +2642,8 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
     if(fNewAsset)
     {
         entity.Zero();
-        if(mc_gState->m_Features->ShortTxIDAsAssetRef())
-        {
-            entity.m_EntityType=MC_TET_ASSET | MC_TET_CHAINPOS;
-            memcpy(entity.m_EntityID,(unsigned char*)&hash+MC_AST_SHORT_TXID_OFFSET,MC_AST_SHORT_TXID_SIZE);
-        }
-        else
-        {
-            if(block >= 0)
-            {
-                entity.m_EntityType=MC_TET_ASSET | MC_TET_CHAINPOS;
-                int tx_offset=sizeof(CBlockHeader)+block_pos->nTxOffset;
-                mc_PutLE(entity.m_EntityID,&block,4);
-                mc_PutLE(entity.m_EntityID+4,&tx_offset,4);
-                for(i=0;i<MC_ENT_REF_PREFIX_SIZE;i++)
-                {
-                    entity.m_EntityID[8+i]=*((unsigned char*)&hash+MC_ENT_KEY_SIZE-1-i);
-                }
-            }
-        }
+        entity.m_EntityType=MC_TET_ASSET | MC_TET_CHAINPOS;
+        memcpy(entity.m_EntityID,(unsigned char*)&hash+MC_AST_SHORT_TXID_OFFSET,MC_AST_SHORT_TXID_SIZE);
         if(entity.m_EntityType)
         {
             if(imp->FindEntity(&entity) >= 0)    
@@ -2153,10 +2657,18 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
             {
                 if(m_Mode & MC_WMD_AUTOSUBSCRIBE_ASSETS)
                 {
-                    m_Database->AddEntity(imp,&entity,0);
-                    imp->m_TmpEntities->Add(&entity,NULL);
-                    entity.m_EntityType=MC_TET_ASSET | MC_TET_TIMERECEIVED;
-                    m_Database->AddEntity(imp,&entity,0);
+                    fNewAsset=false;
+                    if(imp->m_ImportID == 0)
+                    {
+                        fNewAsset=true;
+                    }
+                    if(fNewAsset)
+                    {
+                        m_Database->AddEntity(imp,&entity,0);
+                        imp->m_TmpEntities->Add(&entity,NULL);
+                        entity.m_EntityType=MC_TET_ASSET | MC_TET_TIMERECEIVED;
+                        m_Database->AddEntity(imp,&entity,0);
+                    }
                 }
             }
         }
@@ -2166,14 +2678,7 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
     {
         ptrOut=mc_gState->m_TmpAssetsOut->GetRow(i);
         entity.Zero();
-        if(mc_gState->m_Features->ShortTxIDAsAssetRef())
-        {
-            memcpy(entity.m_EntityID,ptrOut+MC_AST_SHORT_TXID_OFFSET,MC_AST_SHORT_TXID_SIZE);
-        }
-        else
-        {
-            memcpy(entity.m_EntityID,ptrOut,MC_AST_ASSET_REF_SIZE);            
-        }
+        memcpy(entity.m_EntityID,ptrOut+MC_AST_SHORT_TXID_OFFSET,MC_AST_SHORT_TXID_SIZE);
         entity.m_EntityType=MC_TET_ASSET | MC_TET_CHAINPOS;
         fRelevantEntity=false;
         if(imp->FindEntity(&entity) >= 0)    
@@ -2293,7 +2798,18 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
         block_tx_offset=0;        
     }
     
-    LogPrint("wallet","wtxs: Found %d entities in tx %s, flags: %08X, import %d\n",imp->m_TmpEntities->GetCount(),tx.GetHash().ToString().c_str(),flags,imp->m_ImportID);
+    fAlreadyInTheWalletForNotify=false;
+    if(!GetArg("-walletnotify", "").empty() || !GetArg("-walletnotifynew", "").empty())
+    {
+        mc_TxDefRow StoredTxDef;
+        if(m_Database->GetTx(&StoredTxDef,(unsigned char*)&hash) == 0)
+        {
+            fAlreadyInTheWalletForNotify=true;
+        }        
+    }
+    
+    
+    if(fDebug)LogPrint("wallet","wtxs: Found %d entities in tx %s, flags: %08X, import %d\n",imp->m_TmpEntities->GetCount(),tx.GetHash().ToString().c_str(),flags,imp->m_ImportID);
     err=m_Database->AddTx(imp,(unsigned char*)&hash,(unsigned char*)&ss[0],txsize,txfullsize,block,block_file,block_offset,block_tx_offset,block_tx_index,flags,timestamp,imp->m_TmpEntities);
     if(err == MC_ERR_NOERROR)                                                   // Adding tx to unconfirmed send
     {
@@ -2306,6 +2822,8 @@ int mc_WalletTxs::AddTx(mc_TxImport *import,const CWalletTx& tx,int block,CDiskT
             }
         }
     }
+    
+    WalletTxNotify(imp,tx,block,fAlreadyInTheWalletForNotify,block_hash);
     
     if(err == MC_ERR_NOERROR)                                                   // Updating UTXO map
     {
@@ -2356,7 +2874,13 @@ exitlbl:
             entity.m_EntityType=MC_TET_STREAM_PUBLISHER | MC_TET_CHAINPOS;
             m_Database->AddEntity(imp,&entity,0);
             entity.m_EntityType=MC_TET_STREAM_PUBLISHER | MC_TET_TIMERECEIVED;
-            m_Database->AddEntity(imp,&entity,0);            
+            m_Database->AddEntity(imp,&entity,0); 
+
+            if(mc_gState->m_Features->Chunks())
+            {
+                entity.m_EntityType=MC_TET_STREAM;
+                m_ChunkDB->AddEntity(&entity,0);
+            }            
         }       
     }
     

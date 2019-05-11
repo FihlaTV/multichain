@@ -1,12 +1,13 @@
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "chainparams/chainparamsbase.h"
 #include "version/clientversion.h"
 #include "rpc/rpcclient.h"
 #include "rpc/rpcprotocol.h"
+#include "rpc/rpcasio.h"
 #include "utils/util.h"
 #include "utils/utilstrencodings.h"
 
@@ -26,29 +27,35 @@ using namespace boost;
 using namespace boost::asio;
 using namespace json_spirit;
 
+static const int CONTINUE_EXECUTION=-1;
+extern unsigned int JSON_NO_DOUBLE_FORMATTING;  
+extern int JSON_DOUBLE_DECIMAL_DIGITS;                             
+
 std::string HelpMessageCli()
 {
     string strUsage;
     strUsage += _("Options:") + "\n";
-    strUsage += "  -?                     " + _("This help message") + "\n";
-    strUsage += "  -conf=<file>           " + strprintf(_("Specify configuration file (default: %s)"), "multichain.conf") + "\n";
-    strUsage += "  -datadir=<dir>         " + _("Specify data directory") + "\n";
+    strUsage += "  -?                       " + _("This help message") + "\n";
+    strUsage += "  -conf=<file>             " + strprintf(_("Specify configuration file (default: %s)"), "multichain.conf") + "\n";
+    strUsage += "  -datadir=<dir>           " + _("Specify data directory") + "\n";
+    strUsage += "  -cold                    " + _("Connect to multichaind-cold: use multichaind-cold default directory if -datadir is not set") + "\n";
 /* MCHN START */    
-    strUsage += "  -saveclilog=<n>        " + _("If <n>=0 multichain-cli history is not saved, default 1") + "\n";
+    strUsage += "  -requestout=<requestout> " + _("Send request to stderr, stdout or null (not print it at all), default stderr") + "\n"; 
+    strUsage += "  -saveclilog=<n>          " + _("If <n>=0 multichain-cli history is not saved, default 1") + "\n";
 /*    
     strUsage += "  -testnet               " + _("Use the test network") + "\n";
     strUsage += "  -regtest               " + _("Enter regression test mode, which uses a special chain in which blocks can be "
                                                 "solved instantly. This is intended for regression testing tools and app development.") + "\n";
  */ 
 /* MCHN END */    
-    strUsage += "  -rpcconnect=<ip>       " + strprintf(_("Send commands to node running on <ip> (default: %s)"), "127.0.0.1") + "\n";
-    strUsage += "  -rpcport=<port>        " + _("Connect to JSON-RPC on <port> ") + "\n";
-    strUsage += "  -rpcwait               " + _("Wait for RPC server to start") + "\n";
-    strUsage += "  -rpcuser=<user>        " + _("Username for JSON-RPC connections") + "\n";
-    strUsage += "  -rpcpassword=<pw>      " + _("Password for JSON-RPC connections") + "\n";
+    strUsage += "  -rpcconnect=<ip>         " + strprintf(_("Send commands to node running on <ip> (default: %s)"), "127.0.0.1") + "\n";
+    strUsage += "  -rpcport=<port>          " + _("Connect to JSON-RPC on <port> ") + "\n";
+    strUsage += "  -rpcwait                 " + _("Wait for RPC server to start") + "\n";
+    strUsage += "  -rpcuser=<user>          " + _("Username for JSON-RPC connections") + "\n";
+    strUsage += "  -rpcpassword=<pw>        " + _("Password for JSON-RPC connections") + "\n";
 
     strUsage += "\n" + _("SSL options: ") + "\n";
-    strUsage += "  -rpcssl                " + _("Use OpenSSL (https) for JSON-RPC connections") + "\n";
+    strUsage += "  -rpcssl                  " + _("Use OpenSSL (https) for JSON-RPC connections") + "\n";
 
     return strUsage;
 }
@@ -72,7 +79,11 @@ public:
 
 };
 
-static bool AppInitRPC(int argc, char* argv[])
+//
+// This function returns either one of EXIT_ codes when it's expected to stop the process or
+// CONTINUE_EXECUTION when it's expected to continue further.
+//
+static int AppInitRPC(int argc, char* argv[])
 {
     //
     // Parameters
@@ -91,14 +102,21 @@ static bool AppInitRPC(int argc, char* argv[])
 
     mc_gState=new mc_State;
     
-    mc_gState->m_Params->Parse(argc, argv);
-    
+    mc_gState->m_Params->Parse(argc, argv, MC_ETP_CLI);
+
+    if(GetBoolArg("-cold",false))
+    {
+        mc_gState->m_SessionFlags |= MC_SSF_COLD;
+    }
+                
+    mc_CheckDataDirInConfFile();
+   
     if(mc_gState->m_Params->NetworkName())
     {
         if(strlen(mc_gState->m_Params->NetworkName()) > MC_PRM_NETWORK_NAME_MAX_SIZE)
         {
             fprintf(stderr, "ERROR: invalid chain name: %s\n",mc_gState->m_Params->NetworkName());
-            return false;
+            return EXIT_FAILURE;
         }
     }
     
@@ -109,7 +127,7 @@ static bool AppInitRPC(int argc, char* argv[])
         (mc_gState->m_Params->NetworkName() == NULL) ||
         mc_gState->m_Params->m_NumArguments<minargs)
       {
-        fprintf(stdout,"\nMultiChain Core RPC client %s\n\n",mc_gState->GetFullVersion());
+        fprintf(stdout,"\nMultiChain %s RPC client\n\n",mc_BuildDescription(mc_gState->GetNumericVersion()).c_str());
         
         std::string strUsage = "";
         if (mc_gState->m_Params->HasOption("-version"))
@@ -126,8 +144,10 @@ static bool AppInitRPC(int argc, char* argv[])
         }
 
         fprintf(stdout, "%s", strUsage.c_str());
-        return false;
+        return EXIT_SUCCESS;
     }
+
+    
     
 /*    
     if (!boost::filesystem::is_directory(GetDataDir(false))) {
@@ -160,7 +180,7 @@ static bool AppInitRPC(int argc, char* argv[])
                     if(read_err != MC_ERR_FILE_READ_ERROR)
                     {
                         fprintf(stderr,"ERROR: Couldn't read configuration file for blockchain %s. Please try upgrading MultiChain. Exiting...\n",mc_gState->m_Params->NetworkName());
-                        return false;
+                        return EXIT_FAILURE;
                     }
                 }
             }
@@ -175,7 +195,7 @@ static bool AppInitRPC(int argc, char* argv[])
     if(err)
     {
         fprintf(stderr,"ERROR: Couldn't read parameter file for blockchain %s. Exiting...\n",mc_gState->m_Params->NetworkName());
-        return false;
+        return EXIT_FAILURE;
     }
 
     RPCPort=mc_gState->m_Params->GetOption("-rpcport",RPCPort);
@@ -190,7 +210,7 @@ static bool AppInitRPC(int argc, char* argv[])
     }
  */ 
 
-    return true;
+    return CONTINUE_EXECUTION;
 }
 
 Object CallRPC(const string& strMethod, const Array& params)
@@ -221,11 +241,27 @@ Object CallRPC(const string& strMethod, const Array& params)
     map<string, string> mapRequestHeaders;
     mapRequestHeaders["Authorization"] = string("Basic ") + strUserPass64;
     // Send request
-    string strRequest = JSONRPCRequest(strMethod, params, 1);
+//    JSON_NO_DOUBLE_FORMATTING=1;    
+    
+    int32_t id_nonce;
+    id_nonce=mc_RandomInRange(10000000,99999999);
+    Value req_id=strprintf("%08d-%u",id_nonce,mc_TimeNowAsUInt());
+    
+    string strRequest = JSONRPCRequest(strMethod, params, req_id);
+//    JSON_NO_DOUBLE_FORMATTING=0;    
+    JSON_DOUBLE_DECIMAL_DIGITS=GetArg("-apidecimaldigits",-1);        
     string strPost = HTTPPost(strRequest, mapRequestHeaders);
     stream << strPost << std::flush;
 
-    printf("%s\n",strRequest.c_str());
+    string requestout=GetArg("-requestout","stderr");
+    if(requestout == "stdout")
+    {
+        fprintf(stdout, "%s\n", strRequest.c_str());        
+    }
+    if(requestout == "stderr")
+    {
+        fprintf(stderr, "%s\n", strRequest.c_str());        
+    }
     
     // Receive HTTP reply status
     int nProto = 0;
@@ -351,9 +387,10 @@ int main(int argc, char* argv[])
 {
     SetupEnvironment();
     try {
-        if(!AppInitRPC(argc, argv))
-            return EXIT_FAILURE;
-    }
+        int ret = AppInitRPC(argc, argv);
+        if (ret != CONTINUE_EXECUTION)
+            return ret;
+     }
     catch (std::exception& e) {
         PrintExceptionContinue(&e, "AppInitRPC()");
         return EXIT_FAILURE;
@@ -375,10 +412,23 @@ int main(int argc, char* argv[])
     boost::filesystem::create_directories(path_cli_log);
     path_cli_log /= string(mc_gState->m_Params->NetworkName() + string(".log"));
     
+    if (mapArgs["-rpcuser"] == "" && mapArgs["-rpcpassword"] == "")
+    {
+        string strMethod=strprintf("%s",mc_gState->m_Params->NetworkName());
+        if(HaveAPIWithThisName(strMethod))
+        {
+            fprintf(stdout,"\nMultiChain %s RPC client\n\n",mc_BuildDescription(mc_gState->GetNumericVersion()).c_str());
+            printf("ERROR: Couldn't read configuration file for blockchain %s. \n\n"
+                    "Be sure include the blockchain name before the command name, e.g.:\n\n"
+                    "multichain-cli chain1 %s\n\n",mc_gState->m_Params->NetworkName(),mc_gState->m_Params->NetworkName());
+            return EXIT_FAILURE;                        
+        }
+    }
+    
  #ifndef WIN32   
     if(mc_gState->m_Params->m_NumArguments == 1)                                // Interactive mode
     {
-        fprintf(stdout,"\nMultiChain Core RPC client %s\n\n",mc_gState->GetFullVersion());
+        fprintf(stdout,"\nMultiChain %s RPC client\n\n",mc_BuildDescription(mc_gState->GetNumericVersion()).c_str());
         if (mapArgs["-rpcuser"] == "" && mapArgs["-rpcpassword"] == "")
         {
             string str=strprintf(
@@ -481,7 +531,7 @@ int main(int argc, char* argv[])
         return 0;
     }
 #endif
-    
+
     int ret = EXIT_FAILURE;
     try {
         mc_SaveCliCommandToLog(path_cli_log.string().c_str(), argc, argv);

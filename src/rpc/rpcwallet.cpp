@@ -1,7 +1,7 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "structs/amount.h"
@@ -47,7 +47,7 @@ static CCriticalSection cs_nWalletUnlockTime;
 std::string HelpRequiringPassphrase()
 {
     return pwalletMain && pwalletMain->IsCrypted()
-        ? "\nRequires wallet passphrase to be set with walletpassphrase call."
+        ? "\nRequires wallet passphrase to be set with walletpassphrase call.\n"
         : "";
 }
 
@@ -76,7 +76,7 @@ Value getnewaddress(const Array& params, bool fHelp)
     {
         if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
         {
-            throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+            throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
         }            
         strAccount = AccountFromValue(params[0]);
     }
@@ -151,7 +151,7 @@ Value getaccountaddress(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }            
     
     // Parse the account first so we don't generate a key if there's an error
@@ -193,7 +193,7 @@ Value setaccount(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }            
     
     CBitcoinAddress address(params[0].get_str());
@@ -218,7 +218,7 @@ Value setaccount(const Array& params, bool fHelp)
         pwalletMain->SetAddressBook(address.Get(), strAccount, "receive");
     }
     else
-        throw JSONRPCError(RPC_MISC_ERROR, "setaccount can only be used with own address");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "setaccount can only be used with own address");
 
     return Value::null;
 }
@@ -231,7 +231,7 @@ Value getaccount(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }            
     
     CBitcoinAddress address(params[0].get_str());
@@ -257,7 +257,7 @@ Value getaddressesbyaccount(const Array& params, bool fHelp)
     {
         if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
         {
-            throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+            throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
         }            
     }
     
@@ -306,7 +306,7 @@ void SendMoney(const CTxDestination &address, CAmount nValue, CWalletTx& wtxNew,
     {
         strError = "Error: Wallet locked, unable to create transaction!";
         LogPrintf("SendMoney() : %s", strError);
-        throw JSONRPCError(RPC_WALLET_ERROR, strError);
+        throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, strError);
     }
 
     // Parse Bitcoin address
@@ -340,9 +340,9 @@ void SendMoney(const CTxDestination &address, CAmount nValue, CWalletTx& wtxNew,
     
     if(dropscript)
     {
-        LogPrint("mchnminor","mchn: Sending script with %d OP_DROP element(s)",dropscript->GetNumElements());
-        if(dropscript->GetNumElements() > mc_gState->m_NetworkParams->GetInt64Param("maxstdopdropscount") )
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid number of elements in script");
+        if(fDebug)LogPrint("mchnminor","mchn: Sending script with %d OP_DROP element(s)",dropscript->GetNumElements());
+        if(dropscript->GetNumElements() > MCP_STD_OP_DROP_COUNT )
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Invalid number of elements in script");
 
         for(int element=0;element < dropscript->GetNumElements();element++)
         {
@@ -352,7 +352,7 @@ void SendMoney(const CTxDestination &address, CAmount nValue, CWalletTx& wtxNew,
                 scriptPubKey << vector<unsigned char>(elem, elem + elem_size) << OP_DROP;
             }
             else
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid script");
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Invalid script");
         }
     }        
     
@@ -377,7 +377,7 @@ void SendMoney(const CTxDestination &address, CAmount nValue, CWalletTx& wtxNew,
         if (nValue + nFeeRequired > pwalletMain->GetBalance())
             strError = strprintf("Error: This transaction requires a transaction fee of at least %s because of its amount, complexity, or use of recently received funds!", FormatMoney(nFeeRequired));
         LogPrintf("SendMoney() : %s\n", strError);
-        throw JSONRPCError(RPC_WALLET_ERROR, strError);
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strError);
     }
 /* MCHN START */
     string strRejectReason;
@@ -385,11 +385,11 @@ void SendMoney(const CTxDestination &address, CAmount nValue, CWalletTx& wtxNew,
     {
         if(strRejectReason.size())
         {
-            throw JSONRPCError(RPC_WALLET_ERROR, "Error: The transaction was rejected: " + strRejectReason);
+            throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Error: The transaction was rejected: " + strRejectReason);
         }
         else
         {
-            throw JSONRPCError(RPC_WALLET_ERROR, "Error: The transaction was rejected! This might happen if some of the coins in your wallet were already spent, such as if you used a copy of wallet.dat and coins were spent in the copy but not marked as spent here.");
+            throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Error: this transaction was rejected. This may be because you are sharing private keys between nodes, and another node has spent the funds used by this transaction.");
         }                        
     }        
     
@@ -409,7 +409,7 @@ Value listaddresses(const Array& params, bool fHelp)
 
     if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
     {
-        throw JSONRPCError(RPC_INVALID_REQUEST, "API is not supported with this wallet version. To get this functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. To get this functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
     }   
 
     Array result;
@@ -478,31 +478,12 @@ Value listaddresses(const Array& params, bool fHelp)
     count=entity_count;
     if (params.size() > 2)    
     {
-        if(params[2].type() == int_type)
-        {
-            count=params[2].get_int();
-            if(count < 0)
-            {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid count"));                            
-            }
-        }
-        else
-        {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid count"));            
-        }
+        count=paramtoint(params[2],true,0,"Invalid count");
     }
-    
     start=-count;
     if (params.size() > 3)    
     {
-        if(params[3].type() == int_type)
-        {
-            start=params[3].get_int();
-        }
-        else
-        {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid start"));            
-        }
+        start=paramtoint(params[3],false,0,"Invalid start");
     }
     
     mc_AdjustStartAndCount(&count,&start,address_count);
@@ -533,17 +514,88 @@ Value listaddresses(const Array& params, bool fHelp)
 
 
 
-
-
-
-
-
-
-Value gettxoutdata(const Array& params, bool fHelp)
+Value storechunk(const Array& params, bool fHelp)
 {
-    if (fHelp || params.size() < 2 || params.size() > 4)                        // MCHN
+    int err;
+    
+    if (fHelp || params.size() != 1) 
         throw runtime_error("Help message not found\n");
     
+    if((mc_gState->m_WalletMode & MC_WMD_TXS) == 0)
+    {
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "API is not supported with this wallet version. To get this functionality, run \"multichaind -walletdbversion=2 -rescan\" ");        
+    }   
+    
+    vector<unsigned char> vValue;
+    if(params[0].type() != str_type)
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "data should be hexadecimal string");                                                                                                                
+    }
+    
+    bool fIsHex;
+    vValue=ParseHex(params[0].get_str().c_str(),fIsHex);    
+    if(!fIsHex)
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "data should be hexadecimal string");                                                                                                                
+    }        
+    
+    if(vValue.size() == 0)
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "data should be non-empty hexadecimal string");                                                                                                                        
+    }
+
+    if((int)vValue.size() > MAX_CHUNK_SIZE)
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "data is too long");                                                                                                                        
+    }
+    
+    uint256 hash;
+    mc_gState->m_TmpBuffers->m_RpcHasher1->DoubleHash(&vValue[0],(int)vValue.size(),&hash);
+/*    
+    mc_SHA256 *hasher;
+    
+    hasher=new mc_SHA256;    
+    hasher->Reset();
+    hasher->Write(&vValue[0],(int)vValue.size());
+    hasher->GetHash((unsigned char*)&hash);
+    hasher->Reset();
+    hasher->Write((unsigned char*)&hash,32);
+    hasher->GetHash((unsigned char*)&hash);
+    
+    delete hasher;
+*/    
+    mc_TxEntity entity;
+    entity.Zero();
+    entity.m_EntityType=MC_TET_AUTHOR;
+    
+    err=pwalletTxsMain->m_ChunkDB->AddChunk((unsigned char*)&hash,&entity,NULL,-1,(unsigned char*)&vValue[0],NULL,(int)vValue.size(),0,0);
+    
+    if(err)
+    {
+        switch(err)
+        {
+            case MC_ERR_FOUND:
+                break;
+            default:
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Internal error: couldn't store chunk");                                                                                                                                
+                break;
+        }
+    }
+    
+//    pwalletTxsMain->m_ChunkDB->FlushSourceChunks(GetArg("-chunkflushmode",MC_CDB_FLUSH_MODE_COMMIT));
+    if(pwalletTxsMain->m_ChunkDB->FlushSourceChunks(GetArg("-flushsourcechunks",true) ? (MC_CDB_FLUSH_MODE_FILE | MC_CDB_FLUSH_MODE_DATASYNC) : MC_CDB_FLUSH_MODE_NONE))
+    {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't store offchain items, probably chunk database is corrupted");                                                
+    }
+    pwalletTxsMain->m_ChunkDB->Dump("storechunk");
+    
+    return hash.GetHex();
+}
+
+
+
+Value txoutdata_operation(const Array& params,int fHan)
+{
     uint256 hash(params[0].get_str());
     int n = params[1].get_int();
     
@@ -574,13 +626,13 @@ Value gettxoutdata(const Array& params, bool fHelp)
         uint256 hashBlock = 0;
         if (!GetTransaction(hash, tx, hashBlock, true))
         {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "No information available about transaction");
+            throw JSONRPCError(RPC_TX_NOT_FOUND, "No information available about transaction");
         }
     }
 
     if( (n<0) || (n >= (int)tx.vout.size()) ) 
     {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid vout");        
+        throw JSONRPCError(RPC_OUTPUT_NOT_FOUND, "Invalid vout");        
     }
             
     const CScript& script1 = tx.vout[n].scriptPubKey;        
@@ -589,67 +641,204 @@ Value gettxoutdata(const Array& params, bool fHelp)
     mc_gState->m_TmpScript->Clear();
     mc_gState->m_TmpScript->SetScript((unsigned char*)(&pc1[0]),(size_t)(script1.end()-pc1),MC_SCR_TYPE_SCRIPTPUBKEY);
 
-    string metadata="";
+    uint32_t format;
+    unsigned char *chunk_hashes;
+    int chunk_count=0;   
+    int64_t total_chunk_size,out_size;
+    uint32_t retrieve_status;
+    size_t elem_size;
+    const unsigned char *elem;
+    string error_str;
+    int errorCode;
     
     if(mc_gState->m_TmpScript->IsOpReturnScript() == 0)                      
     {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Output without metadata");        
+        unsigned char *ptr;
+        int size;
+        elem=NULL;
+        
+        for (int e = 0; e < mc_gState->m_TmpScript->GetNumElements(); e++)
+        {
+            mc_gState->m_TmpScript->SetElement(e);
+            if(mc_gState->m_TmpScript->GetRawData(&ptr,&size) == 0)      
+            {
+                if(elem)
+                {
+                    throw JSONRPCError(RPC_NOT_ALLOWED, "This output has more than one data item");                                
+                }
+                format=MC_SCR_DATA_FORMAT_UNKNOWN;
+                if(e > 0)
+                {
+                    mc_gState->m_TmpScript->SetElement(e-1);
+                    mc_gState->m_TmpScript->GetDataFormat(&format);
+                }
+                elem=ptr;
+                elem_size=size;
+                out_size=elem_size;
+            }        
+        }
+        if(elem == NULL)
+        {
+            throw JSONRPCError(RPC_OUTPUT_NOT_DATA, "Output without metadata");        
+        }
     }
-    size_t elem_size;
-    const unsigned char *elem;
+    else
+    {
+//        mc_gState->m_TmpScript->ExtractAndDeleteDataFormat(&format);
+        mc_gState->m_TmpScript->ExtractAndDeleteDataFormat(&format,&chunk_hashes,&chunk_count,&total_chunk_size);
+        retrieve_status = GetFormattedData(mc_gState->m_TmpScript,&elem,&out_size,chunk_hashes,chunk_count,total_chunk_size);
+        if(retrieve_status & MC_OST_ERROR_MASK)
+        {
+            error_str=OffChainError(retrieve_status,&errorCode);
+            throw JSONRPCError(errorCode, error_str);                    
+        }
+        
+        elem_size=(size_t)out_size;
+        if( ( (retrieve_status & MC_OST_STATUS_MASK) != MC_OST_RETRIEVED ) && 
+            ( (retrieve_status & MC_OST_STORAGE_MASK) != MC_OST_ON_CHAIN ) )
+        {
+                throw JSONRPCError(RPC_OUTPUT_NOT_FOUND, "Data for this output is not available");        
+        }            
+//        elem = mc_gState->m_TmpScript->GetData(mc_gState->m_TmpScript->GetNumElements()-1,&elem_size);
+    }
 
-    elem = mc_gState->m_TmpScript->GetData(mc_gState->m_TmpScript->GetNumElements()-1,&elem_size);
-
-    int count,start;
-    count=elem_size;
+    int64_t count,start;
+    count=out_size;
+    start=0;
+    
     if (params.size() > 2)    
     {
-        if(params[2].type() == int_type)
-        {
-            count=params[2].get_int();
-            if(count < 0)
-            {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid count"));                            
-            }
-        }
-        else
-        {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid count"));            
-        }
+        count=paramtoint64(params[2],true,0,"Invalid count");
     }
-    
-    start=0;
     if (params.size() > 3)    
     {
-        if(params[3].type() == int_type)
-        {
-            start=params[3].get_int();
-        }
-        else
-        {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid start"));            
-        }
+        start=paramtoint64(params[3],false,0,"Invalid start");
     }
 
     if(start < 0)
     {
-        start=elem_size+start;
+        start=out_size+start;
         if(start<0)
         {
             start=0;
         }        
     }
-    
-    if(start > (int)elem_size)
+
+    if(start > out_size)
     {
-        start=elem_size;
+        start=out_size;
     }
-    if(start+count > (int)elem_size)
+    if(start+count > out_size)
     {
-        count=elem_size-start;
+        count=out_size-start;
     }
 
-    return HexStr(elem+start,elem+start+count);
+    if( (format == MC_SCR_DATA_FORMAT_UBJSON) || (format == MC_SCR_DATA_FORMAT_UTF8) )
+    {
+        if(fHan)
+        {
+            throw JSONRPCError(RPC_NOT_SUPPORTED, "This API is not supported for text and JSON data");                                                                                        
+        }
+        if(start != 0)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid start, must be 0 for text and JSON data");                                                                            
+        }
+        if(count != out_size)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid count, must include all text or JSON data");                                                                            
+        }
+    }
+
+    if(fHan)
+    {
+        if(chunk_count > 1)
+        {
+            if(elem == NULL)
+            {
+                elem=GetChunkDataInRange(&out_size,chunk_hashes,chunk_count,start,count,fHan);
+                if(elem == NULL)
+                {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't retrieve data for this output");                                                                                            
+                }
+                return count;
+            }
+        }        
+        else
+        {
+            if(write(fHan,elem+start,count) != count)
+            {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Cannot store binary cache item");                                                                                                                                    
+            }            
+            return count;
+        }
+    }
+    
+    if(count > 0x4000000)
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid count, must be below 64MB");                                                                            
+    }
+    
+    if(chunk_count > 1)
+    {
+        if(elem == NULL)
+        {
+            elem=GetChunkDataInRange(&out_size,chunk_hashes,chunk_count,start,count,0);
+            if(elem == NULL)
+            {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't retrieve data for this output");                                                                                            
+            }
+            return OpReturnFormatEntry(elem,count,0,0,format,NULL);        
+        }
+    }
+    return OpReturnFormatEntry(elem+start,count,0,0,format,NULL);            
+}
+
+Value txouttobinarycache(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 3 || params.size() > 5)                        // MCHN
+        throw runtime_error("Help message not found\n");    
+ 
+    int64_t size;
+    
+    int fHan=mc_BinaryCacheFile(params[0].get_str(),2);
+    if(fHan <= 0)
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Binary cache item with this identifier not found");                                                                                                                        
+    }
+    
+    size=lseek64(fHan,0,SEEK_END);
+    
+    if(size)
+    {
+        close(fHan);
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "Binary cache item is not empty");                                                                                                                                            
+    }
+
+    Array ext_params;
+    int param_count=0;
+    BOOST_FOREACH(const Value& value, params)
+    {
+        if(param_count)
+        {
+            ext_params.push_back(value);
+        }
+        param_count++;
+    }
+    
+    size=txoutdata_operation(ext_params,fHan).get_int64();    
+
+    close(fHan);
+        
+    return size;
+    
+}
+
+Value gettxoutdata(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 2 || params.size() > 4)                        // MCHN
+        throw runtime_error("Help message not found\n");
+    
+    return txoutdata_operation(params,0);    
 }
 
 /* MCHN END */
@@ -691,17 +880,42 @@ Value signmessage(const Array& params, bool fHelp)
     string strAddress = params[0].get_str();
     string strMessage = params[1].get_str();
 
+    CKey key;
     CBitcoinAddress addr(strAddress);
     if (!addr.IsValid())
-        throw JSONRPCError(RPC_TYPE_ERROR, "Invalid address");
+    {
+        CBitcoinSecret vchSecret;
+        bool fGood = vchSecret.SetString(strAddress);
 
-    CKeyID keyID;
-    if (!addr.GetKeyID(keyID))
-        throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to key");
+        if (fGood)
+        {
+            key = vchSecret.GetKey();
+            if (!key.IsValid()) 
+            {
+                fGood=false;
+            }            
+            else
+            {
+                CPubKey pubkey = key.GetPubKey();
+                assert(key.VerifyPubKey(pubkey));
+                
+            }
+        }
+        if(!fGood)
+        {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address or private key");            
+        }
+    }
+    else
+    {
+        CKeyID keyID;
+        if (!addr.GetKeyID(keyID))
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Address does not refer to key");
 
-    CKey key;
-    if (!pwalletMain->GetKey(keyID, key))
-        throw JSONRPCError(RPC_WALLET_ERROR, "Private key not available");
+        if (!pwalletMain->GetKey(keyID, key))
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Private key not available");        
+    }
+
 
     CHashWriter ss(SER_GETHASH, 0);
     ss << strMessageMagic;
@@ -709,7 +923,7 @@ Value signmessage(const Array& params, bool fHelp)
 
     vector<unsigned char> vchSig;
     if (!key.SignCompact(ss.GetHash(), vchSig))
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Sign failed");
+        throw JSONRPCError(RPC_WALLET_ERROR, "Sign failed");
 
     return EncodeBase64(&vchSig[0], vchSig.size());
 }
@@ -721,7 +935,7 @@ Value getreceivedbyaddress(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }            
     
     // Bitcoin address
@@ -762,7 +976,7 @@ Value getreceivedbyaccount(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }            
     
     // Minimum confirmations
@@ -862,9 +1076,15 @@ Value getbalance(const Array& params, bool fHelp)
             {
                 CTxOut txout;
                 out.GetHashAndTxOut(txout);
-                if(out.IsTrusted() || (out.nDepth >= nMinDepth))
+
+                isminetype fIsMine=pwalletMain->IsMine(txout);
+                
+                if(fIsMine & filter)
                 {
-                    nBalance+=txout.nValue;
+                    if(out.IsTrustedNoDepth() || (out.nDepth >= nMinDepth))
+                    {
+                        nBalance+=txout.nValue;
+                    }
                 }
             }            
         }
@@ -873,7 +1093,7 @@ Value getbalance(const Array& params, bool fHelp)
             for (map<uint256, CWalletTx>::iterator it = pwalletMain->mapWallet.begin(); it != pwalletMain->mapWallet.end(); ++it)
             {
                 const CWalletTx& wtx = (*it).second;
-                if (!wtx.IsTrusted() || wtx.GetBlocksToMaturity() > 0)
+                if (!IsFinalTx(wtx) || wtx.GetBlocksToMaturity() > 0 || wtx.GetDepthInMainChain() < 0)
                     continue;
 
                 CAmount allFee;
@@ -896,7 +1116,7 @@ Value getbalance(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need getbalance, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need getbalance, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }
     string strAccount = AccountFromValue(params[0]);
 
@@ -920,7 +1140,7 @@ Value movecmd(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need move, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need move, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }
     
     string strFrom = AccountFromValue(params[0]);
@@ -973,7 +1193,7 @@ Value sendfrom(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need sendfrom, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need sendfrom, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }
     
     string strAccount = AccountFromValue(params[0]);
@@ -1014,7 +1234,7 @@ Value sendmany(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need sendmany, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need sendmany, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }
     
     string strAccount = AccountFromValue(params[0]);
@@ -1070,7 +1290,7 @@ Value sendmany(const Array& params, bool fHelp)
 /* MCHN START */    
     string strRejectReason;
     if (!pwalletMain->CommitTransaction(wtx, keyChange,strRejectReason))
-        throw JSONRPCError(RPC_WALLET_ERROR, "Transaction commit failed: " + strRejectReason);
+        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Transaction commit failed: " + strRejectReason);
 /* MCHN END */    
 
     return wtx.GetHash().GetHex();
@@ -1091,7 +1311,7 @@ Value addmultisigaddress(const Array& params, bool fHelp)
     {
         if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
         {
-            throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+            throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
         }            
         strAccount = AccountFromValue(params[2]);
     }
@@ -1113,6 +1333,16 @@ Value addmultisigaddress(const Array& params, bool fHelp)
         pwalletTxsMain->AddEntity(&entity,MC_EFL_NOT_IN_SYNC);
     }
 
+    CScript outer = GetScriptForDestination(innerID);
+    
+    if(IsMine(*pwalletMain, outer) == ISMINE_NO)
+    {
+        if (!pwalletMain->HaveWatchOnly(outer))
+        {
+            if (!pwalletMain->AddWatchOnly(outer))
+                throw JSONRPCError(RPC_WALLET_ERROR, "Error adding address to wallet");            
+        }
+    }
     
     return CBitcoinAddress(innerID).ToString();
 }
@@ -1257,7 +1487,7 @@ Value listreceivedbyaddress(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }            
     
     return ListReceived(params, false);
@@ -1270,7 +1500,7 @@ Value listreceivedbyaccount(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are ot supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need accounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }            
 
     return ListReceived(params, true);
@@ -1433,37 +1663,7 @@ Value listtransactions(const Array& params, bool fHelp)
     Array ret;
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Not supported with scalable wallet - if you need listtransactions, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
-/*
-        mc_Buffer *entity_rows;
-        entity_rows=new mc_Buffer;
-        entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
-        
-        mc_TxEntity wallet_by_time;
-        mc_TxEntityRow *lpEntTx;
-        wallet_by_time.Zero();
-        wallet_by_time.m_EntityType=MC_TET_TIMERECEIVED;
-        if(filter & ISMINE_WATCH_ONLY)
-        {
-            wallet_by_time.m_EntityType |= MC_TET_WALLET_ALL;
-        }
-        else
-        {
-            wallet_by_time.m_EntityType |= MC_TET_WALLET_SPENDABLE;            
-        }
-        pwalletTxsMain->GetList(&wallet_by_time,-nFrom,nCount,entity_rows);
-        for(int i=entity_rows->GetCount()-1;i>=0;i--)
-        {
-            lpEntTx=(mc_TxEntityRow*)entity_rows->GetRow(i);
-            uint256 hash;
-            mc_TxDefRow txdef;
-            memcpy(&hash,lpEntTx->m_TxId,MC_TDB_TXID_SIZE);
-            const CWalletTx& wtx=pwalletTxsMain->GetWalletTx(hash,&txdef,NULL);
-            ListTransactions(wtx, strAccount, 0, true, ret, filter,&txdef);
-        }
-        delete entity_rows;
-        std::reverse(ret.begin(), ret.end()); // Return oldest to newest
-*/
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Not supported with scalable wallet - if you need listtransactions, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }
     else
     {
@@ -1516,7 +1716,7 @@ Value listaccounts(const Array& params, bool fHelp)
 
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
-        throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Accounts are not supported with scalable wallet - if you need listaccounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Accounts are not supported with scalable wallet - if you need listaccounts, run multichaind -walletdbversion=1 -rescan, but the wallet will perform worse");        
     }   
 
     int nMinDepth = 1;
@@ -1639,6 +1839,7 @@ Value listsinceblock(const Array& params, bool fHelp)
             while(up_tx-down_tx>chunk_size)
             {
                 err=pwalletTxsMain->GetList(&wallet_entity,this_tx,1,lpEntRowBuffer);
+                CheckWalletError(err);
                 if( (err == MC_ERR_NOERROR) && (lpEntRowBuffer->GetCount() > 0) )
                 {
                     entrow=(mc_TxEntityRow *)(lpEntRowBuffer->GetRow(0));
@@ -1662,6 +1863,7 @@ Value listsinceblock(const Array& params, bool fHelp)
             while(this_tx<=tx_count)
             {
                 err=pwalletTxsMain->GetList(&wallet_entity,this_tx,chunk_size,lpEntRowBuffer);
+                CheckWalletError(err);
                 if( (err == MC_ERR_NOERROR) && (lpEntRowBuffer->GetCount() > 0) )
                 {
                     for(int i=0;i<lpEntRowBuffer->GetCount();i++)
@@ -1728,7 +1930,7 @@ Value gettransaction(const Array& params, bool fHelp)
         const CWalletTx& wtx=pwalletTxsMain->GetWalletTx(hash,NULL,&err);
         if(err)
         {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid or non-wallet transaction id");            
+            throw JSONRPCError(RPC_TX_NOT_FOUND, "Invalid or non-wallet transaction id");            
         }            
         CAmount nCredit = wtx.GetCredit(filter);
         CAmount nDebit = wtx.GetDebit(filter);
@@ -1751,7 +1953,7 @@ Value gettransaction(const Array& params, bool fHelp)
     else
     {
         if (!pwalletMain->mapWallet.count(hash))
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid or non-wallet transaction id");
+            throw JSONRPCError(RPC_TX_NOT_FOUND, "Invalid or non-wallet transaction id");
         const CWalletTx& wtx = pwalletMain->mapWallet[hash];
 
         CAmount nCredit = wtx.GetCredit(filter);
@@ -1782,7 +1984,23 @@ Value backupwallet(const Array& params, bool fHelp)
     if (fHelp || params.size() != 1)
         throw runtime_error("Help message not found\n");
 
-    string strDest = params[0].get_str();
+    char bufOutput[MC_DCT_DB_MAX_PATH+1];
+    char *full_path=__US_FullPath(params[0].get_str().c_str(),bufOutput,MC_DCT_DB_MAX_PATH+1);
+    
+    if(full_path)
+    {
+        char bufWallet[MC_DCT_DB_MAX_PATH+1];
+        mc_GetFullFileName(mc_gState->m_NetworkParams->Name(),"wallet",".dat",MC_FOM_RELATIVE_TO_DATADIR,bufWallet);
+
+        if(strcmp(full_path,bufWallet) == 0)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot backup wallet file to itself");        
+        }
+    }
+    
+    
+//    string strDest = params[0].get_str();
+    string strDest = strprintf("%s",full_path);
     if (!BackupWallet(*pwalletMain, strDest))
         throw JSONRPCError(RPC_WALLET_ERROR, "Error: Wallet backup failed!");
 
@@ -1823,24 +2041,7 @@ static void LockWallet(CWallet* pWallet)
 Value walletpassphrase(const Array& params, bool fHelp)
 {
     if (pwalletMain->IsCrypted() && (fHelp || params.size() != 2))              // MCHN
-        throw runtime_error(
-            "walletpassphrase \"passphrase\" timeout\n"
-            "\nStores the wallet decryption key in memory for 'timeout' seconds.\n"
-            "This is needed prior to performing transactions related to private keys such as sending assets\n"
-            "\nArguments:\n"
-            "1. \"passphrase\"     (string, required) The wallet passphrase\n"
-            "2. timeout            (numeric, required) The time to keep the decryption key in seconds.\n"
-            "\nNote:\n"
-            "Issuing the walletpassphrase command while the wallet is already unlocked will set a new unlock\n"
-            "time that overrides the old one.\n"
-            "\nExamples:\n"
-            "\nunlock the wallet for 60 seconds\n"
-            + HelpExampleCli("walletpassphrase", "\"my pass phrase\" 60") +
-            "\nLock the wallet again (before 60 seconds)\n"
-            + HelpExampleCli("walletlock", "") +
-            "\nAs json rpc call\n"
-            + HelpExampleRpc("walletpassphrase", "\"my pass phrase\", 60")
-        );
+        throw runtime_error("Help message not found\n");
 
     if (fHelp)
         return true;
@@ -1878,16 +2079,7 @@ Value walletpassphrase(const Array& params, bool fHelp)
 Value walletpassphrasechange(const Array& params, bool fHelp)
 {
     if (pwalletMain->IsCrypted() && (fHelp || params.size() != 2))
-        throw runtime_error(
-            "walletpassphrasechange \"oldpassphrase\" \"newpassphrase\"\n"
-            "\nChanges the wallet passphrase from 'oldpassphrase' to 'newpassphrase'.\n"
-            "\nArguments:\n"
-            "1. \"oldpassphrase\"      (string) The current passphrase\n"
-            "2. \"newpassphrase\"      (string) The new passphrase\n"
-            "\nExamples:\n"
-            + HelpExampleCli("walletpassphrasechange", "\"old one\" \"new one\"")
-            + HelpExampleRpc("walletpassphrasechange", "\"old one\", \"new one\"")
-        );
+        throw runtime_error("Help message not found\n");
 
     if (fHelp)
         return true;
@@ -1919,21 +2111,7 @@ Value walletpassphrasechange(const Array& params, bool fHelp)
 Value walletlock(const Array& params, bool fHelp)
 {
     if (pwalletMain->IsCrypted() && (fHelp || params.size() != 0))
-        throw runtime_error(
-            "walletlock\n"
-            "\nRemoves the wallet encryption key from memory, locking the wallet.\n"
-            "After calling this method, you will need to call walletpassphrase again\n"
-            "before being able to call any methods which require the wallet to be unlocked.\n"
-            "\nExamples:\n"
-            "\nSet the passphrase for 2 minutes to perform a transaction\n"
-            + HelpExampleCli("walletpassphrase", "\"my pass phrase\" 120") +
-            "\nPerform a send (requires passphrase set)\n"
-            + HelpExampleCli("sendtoaddress", "\"1M72Sfpbz1BPpXFHz9m3CdqATR44Jvaydd\" 1.0") +
-            "\nClear the passphrase since we are done before 2 minutes is up\n"
-            + HelpExampleCli("walletlock", "") +
-            "\nAs json rpc call\n"
-            + HelpExampleRpc("walletlock", "")
-        );
+        throw runtime_error("Help message not found\n");
 
     if (fHelp)
         return true;
@@ -2070,23 +2248,18 @@ Value getwalletinfo(const Array& params, bool fHelp)
     Object obj;
     obj.push_back(Pair("walletversion", pwalletMain->GetVersion()));
     obj.push_back(Pair("balance",       ValueFromAmount(pwalletMain->GetBalance())));
-    if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
+    obj.push_back(Pair("walletdbversion", mc_gState->GetWalletDBVersion()));                
+    if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS) 
     {
-        obj.push_back(Pair("txcount",       (int)pwalletTxsMain->m_Database->m_DBStat.m_Count));        
-        if(mc_gState->m_WalletMode & MC_WMD_MAP_TXS)
-        {
-            obj.push_back(Pair("walletdbversion", -1));                
-        }
-        else
-        {
-            obj.push_back(Pair("walletdbversion", 2));
-        }
+        obj.push_back(Pair("txcount",(int)pwalletTxsMain->m_Database->m_DBStat.m_Count+pwalletTxsMain->m_Database->m_RawMemPools[0]->GetCount()));        
     }
     else
     {
         obj.push_back(Pair("txcount",       (int)pwalletMain->mapWallet.size()));
-        obj.push_back(Pair("walletdbversion", 1));
     }
+    vector<COutput> vecOutputs;
+    pwalletMain->AvailableCoins(vecOutputs, false, NULL, false,true);
+    obj.push_back(Pair("utxocount",  (int)vecOutputs.size()));                
     obj.push_back(Pair("keypoololdest", pwalletMain->GetOldestKeyPoolTime()));
     obj.push_back(Pair("keypoolsize",   (int)pwalletMain->GetKeyPoolSize()));
     if (pwalletMain->IsCrypted())

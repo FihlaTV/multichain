@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef BITCOIN_SCRIPT_STANDARD_H
@@ -50,8 +50,8 @@ static const unsigned int STANDARD_SCRIPT_VERIFY_FLAGS = MANDATORY_SCRIPT_VERIFY
                                                          SCRIPT_VERIFY_STRICTENC |
                                                          SCRIPT_VERIFY_MINIMALDATA |
                                                          SCRIPT_VERIFY_NULLDUMMY |
-                                                         SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS;
-
+                                                         SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS|
+                                                         SCRIPT_VERIFY_LOW_S;
 /** For convenience, standard but not mandatory verify flags. */
 static const unsigned int STANDARD_NOT_MANDATORY_VERIFY_FLAGS = STANDARD_SCRIPT_VERIFY_FLAGS & ~MANDATORY_SCRIPT_VERIFY_FLAGS;
 
@@ -84,10 +84,11 @@ typedef boost::variant<CNoDestination, CKeyID, CScriptID> CTxDestination;
 const char* GetTxnOutputType(txnouttype t);
 
 bool Solver(const CScript& scriptPubKey, txnouttype& typeRet, std::vector<std::vector<unsigned char> >& vSolutionsRet);
+bool TemplateSolver(const CScript& scriptPubKey, txnouttype& typeRet, std::vector<std::vector<unsigned char> >& vSolutionsRet);
 int ScriptSigArgsExpected(txnouttype t, const std::vector<std::vector<unsigned char> >& vSolutions);
 bool IsStandard(const CScript& scriptPubKey, txnouttype& whichType);
 bool ExtractDestination(const CScript& scriptPubKey, CTxDestination& addressRet);
-bool ExtractDestinations(const CScript& scriptPubKey, txnouttype& typeRet, std::vector<CTxDestination>& addressRet, int& nRequiredRet);
+bool ExtractDestinations(const CScript& scriptPubKey, txnouttype& typeRet, std::vector<CTxDestination>& addressRet, int& nRequiredRet,std::vector<std::vector<unsigned char> >* lpvSolutionsRet = NULL);
 
 CScript GetScriptForDestination(const CTxDestination& dest);
 CScript GetScriptForMultisig(int nRequired, const std::vector<CPubKey>& keys);

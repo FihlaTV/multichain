@@ -1,6 +1,6 @@
 // Copyright (c) 2012-2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "structs/bloom.h"
@@ -152,7 +152,7 @@ bool CBloomFilter::IsRelevantAndUpdate(const CTransaction& tx)
                 {
                     txnouttype type;
                     vector<vector<unsigned char> > vSolutions;
-                    if (Solver(txout.scriptPubKey, type, vSolutions) &&
+                    if (TemplateSolver(txout.scriptPubKey, type, vSolutions) &&
                             (type == TX_PUBKEY || type == TX_MULTISIG))
                         insert(COutPoint(hash, i));
                 }

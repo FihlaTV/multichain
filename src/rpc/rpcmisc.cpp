@@ -1,7 +1,7 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "structs/base58.h"
@@ -24,6 +24,8 @@
 #include "multichain/multichain.h"
 #include "wallet/wallettxs.h"
 std::string BurnAddress(const std::vector<unsigned char>& vchVersion);
+std::string SetBannedTxs(std::string txlist);
+std::string SetLockedBlock(std::string hash);
 /* MCHN END */
 
 #include <boost/assign/list_of.hpp>
@@ -38,6 +40,7 @@ using namespace std;
 
 bool CBitcoinAddressFromTxEntity(CBitcoinAddress &address,mc_TxEntity *lpEntity);
 Object AddressEntry(CBitcoinAddress& address,uint32_t verbose);
+int paramtoint(Value param,bool check_for_min,int min_value,string error_message);
 
 /**
  * @note Do not add or change anything in the information returned by this
@@ -64,8 +67,10 @@ Value getinfo(const Array& params, bool fHelp)
 /* MCHN START */    
 //    obj.push_back(Pair("version", CLIENT_VERSION));
 //    obj.push_back(Pair("protocolversion", PROTOCOL_VERSION));
-    obj.push_back(Pair("version", mc_gState->GetVersion()));
-    obj.push_back(Pair("protocolversion", mc_gState->m_NetworkParams->GetInt64Param("protocolversion")));
+    
+    obj.push_back(Pair("version", mc_BuildDescription(mc_gState->GetNumericVersion())));
+    obj.push_back(Pair("nodeversion", mc_gState->GetNumericVersion()));
+    obj.push_back(Pair("protocolversion", mc_gState->m_NetworkParams->ProtocolVersion()));
     obj.push_back(Pair("chainname", string(mc_gState->m_NetworkParams->Name())));
     obj.push_back(Pair("description", string((char*)mc_gState->m_NetworkParams->GetParam("chaindescription",NULL))));
     obj.push_back(Pair("protocol", string((char*)mc_gState->m_NetworkParams->GetParam("chainprotocol",NULL))));    
@@ -77,27 +82,14 @@ Value getinfo(const Array& params, bool fHelp)
     obj.push_back(Pair("burnaddress", BurnAddress(Params().Base58Prefix(CChainParams::PUBKEY_ADDRESS))));                
     obj.push_back(Pair("incomingpaused", (mc_gState->m_NodePausedState & MC_NPS_INCOMING) ? true : false));                
     obj.push_back(Pair("miningpaused", (mc_gState->m_NodePausedState & MC_NPS_MINING) ? true : false));                
+    obj.push_back(Pair("offchainpaused", (mc_gState->m_NodePausedState & MC_NPS_OFFCHAIN) ? true : false));                
 
 /* MCHN END */    
 #ifdef ENABLE_WALLET
     if (pwalletMain) {
         obj.push_back(Pair("walletversion", pwalletMain->GetVersion()));
         obj.push_back(Pair("balance",       ValueFromAmount(pwalletMain->GetBalance())));
-        if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
-        {
-            if(mc_gState->m_WalletMode & MC_WMD_MAP_TXS)
-            {
-                obj.push_back(Pair("walletdbversion", -1));                
-            }
-            else
-            {
-                obj.push_back(Pair("walletdbversion", 2));
-            }
-        }
-        else
-        {
-            obj.push_back(Pair("walletdbversion", 1));
-        }
+        obj.push_back(Pair("walletdbversion", mc_gState->GetWalletDBVersion()));                
     }
 #endif
 /* MCHN START */    
@@ -176,18 +168,429 @@ public:
 #endif
 
 /* MCHN START */
+
+string getparamstring(string param)
+{
+    string str;
+    str="";
+    if(mapMultiArgs.count(param))
+    {
+        for(int i=0;i<(int)mapMultiArgs[param].size();i++)
+        {
+            if(str.size())
+            {
+                str += ",";
+            }
+            str += mapMultiArgs[param][i];
+        }        
+    }
+    return str;
+}
+
+Value getruntimeparams(const json_spirit::Array& params, bool fHelp)
+{
+    if (fHelp || params.size() > 1)                                            
+        throw runtime_error("Help message not found\n");
+    
+    Object obj;
+/*    
+    obj.push_back(Pair("daemon",GetBoolArg("-daemon",false)));                    
+    obj.push_back(Pair("datadir",mc_gState->m_Params->DataDir(0,0)));                    
+    obj.push_back(Pair("debug",getparamstring("-debug")));   
+ */ 
+    obj.push_back(Pair("port",GetListenPort()));   
+    obj.push_back(Pair("reindex",GetBoolArg("-reindex",false)));                    
+    obj.push_back(Pair("rescan",GetBoolArg("-rescan",false)));                    
+/*    
+    obj.push_back(Pair("rpcallowip",getparamstring("-rpcallowip")));   
+    obj.push_back(Pair("rpcport",GetArg("-rpcport", BaseParams().RPCPort())));   
+ */ 
+    obj.push_back(Pair("txindex",GetBoolArg("-txindex",true)));                    
+    obj.push_back(Pair("autocombineminconf",GetArg("-autocombineminconf", 1)));                    
+    obj.push_back(Pair("autocombinemininputs",GetArg("-autocombinemininputs", 50)));                    
+    obj.push_back(Pair("autocombinemaxinputs",GetArg("-autocombinemaxinputs", 100)));                    
+    obj.push_back(Pair("autocombinedelay",GetArg("-autocombinedelay", 1)));                    
+    obj.push_back(Pair("autocombinesuspend",GetArg("-autocombinesuspend", 15)));                    
+    obj.push_back(Pair("autosubscribe",GetArg("-autosubscribe","")));   
+    CKeyID keyID;
+    CPubKey pkey;            
+    if(!pwalletMain->GetKeyFromAddressBook(pkey,MC_PTP_CONNECT))
+    {
+        LogPrintf("mchn: Cannot find address having connect permission, trying default key\n");
+        pkey=pwalletMain->vchDefaultKey;
+    }
+    keyID=pkey.GetID();    
+    obj.push_back(Pair("handshakelocal",GetArg("-handshakelocal",CBitcoinAddress(keyID).ToString())));   
+    obj.push_back(Pair("bantx",GetArg("-bantx","")));                    
+    obj.push_back(Pair("lockblock",GetArg("-lockblock","")));                        
+    obj.push_back(Pair("hideknownopdrops",GetBoolArg("-hideknownopdrops",false)));                    
+    obj.push_back(Pair("maxshowndata",GetArg("-maxshowndata",MAX_OP_RETURN_SHOWN)));                    
+    obj.push_back(Pair("maxqueryscanitems",GetArg("-maxqueryscanitems",MAX_STREAM_QUERY_ITEMS)));                    
+    obj.push_back(Pair("v1apicompatible",GetBoolArg("-v1apicompatible",false)));                    
+    obj.push_back(Pair("miningrequirespeers",Params().MiningRequiresPeers()));                    
+    obj.push_back(Pair("mineemptyrounds",Params().MineEmptyRounds()));                    
+    obj.push_back(Pair("miningturnover",Params().MiningTurnover()));                    
+    obj.push_back(Pair("lockadminminerounds",Params().LockAdminMineRounds()));                    
+    obj.push_back(Pair("gen",GetBoolArg("-gen", true)));                    
+    obj.push_back(Pair("genproclimit",GetArg("-genproclimit", 1)));                    
+    obj.push_back(Pair("lockinlinemetadata",GetBoolArg("-lockinlinemetadata", true)));                    
+    obj.push_back(Pair("acceptfiltertimeout",GetArg("-acceptfiltertimeout", DEFAULT_ACCEPT_FILTER_TIMEOUT)));                    
+    obj.push_back(Pair("sendfiltertimeout",GetArg("-sendfiltertimeout", DEFAULT_SEND_FILTER_TIMEOUT)));                    
+/*
+    obj.push_back(Pair("shortoutput",GetBoolArg("-shortoutput",false)));                    
+    obj.push_back(Pair("walletdbversion", mc_gState->GetWalletDBVersion()));                
+*/
+    return obj;
+}
+
+bool paramtobool(Value param,bool strict)
+{
+    if(!strict)
+    {
+        if(param.type() == str_type)
+        {
+            if(param.get_str() == "true")
+            {
+                return true;
+            }
+            return atoi(param.get_str().c_str()) != 0;
+        }
+        if(param.type() == int_type)
+        {
+            if(param.get_int())
+            {
+                return true;
+            }
+            else
+            {
+                return false;            
+            }
+        }
+    }
+    
+    if(param.type() != bool_type)
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter value type, should be boolean");                            
+    }    
+    
+    return param.get_bool();    
+}
+
+bool paramtobool(Value param)
+{
+    return paramtobool(param,true);
+}
+
+Value setruntimeparam(const json_spirit::Array& params, bool fHelp)
+{
+    if (fHelp || params.size() != 2)                                            
+        throw runtime_error("Help message not found\n");
+    
+    if(mc_gState->m_NetworkParams->IsProtocolMultichain() == 0)
+    {
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "This API is supported only if protocol=multichain");                
+    }
+    
+    string param_name=params[0].get_str();
+    bool fFound=false;
+    if(param_name == "miningrequirespeers")
+    {
+        mapArgs ["-" + param_name]=paramtobool(params[1],false) ? "1" : "0";
+        fFound=true;
+    }
+    if(param_name == "mineemptyblocks")
+    {
+        mapArgs ["-" + param_name]=paramtobool(params[1],false) ? "1" : "0";
+        fFound=true;
+    }
+    if(param_name == "mineblocksondemand")
+    {
+        mapArgs ["-" + param_name]=paramtobool(params[1],false) ? "1" : "0";
+        fFound=true;
+    }
+    if(param_name == "hideknownopdrops")
+    {
+        mapArgs ["-" + param_name]=paramtobool(params[1],false) ? "1" : "0";
+        fFound=true;
+    }
+    if(param_name == "lockinlinemetadata")
+    {
+        mapArgs ["-" + param_name]=paramtobool(params[1],false) ? "1" : "0";
+        fFound=true;
+    }
+    if(param_name == "mineemptyrounds")
+    {
+        if( (params[1].type() == real_type) || (params[1].type() == str_type) )
+        {
+            double dValue;
+            if(params[1].type() == real_type)
+            {
+                dValue=params[1].get_real();
+            }
+            else
+            {
+                dValue=atof(params[1].get_str().c_str());
+            }
+            mapArgs ["-" + param_name]= strprintf("%f", dValue);                                                                
+        }
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter value type");                                            
+        }
+        fFound=true;
+    }
+    if(param_name == "miningturnover")
+    {
+        if( (params[1].type() == real_type) || (params[1].type() == str_type) )
+        {
+            double dValue;
+            if(params[1].type() == real_type)
+            {
+                dValue=params[1].get_real();
+            }
+            else
+            {
+                dValue=atof(params[1].get_str().c_str());
+            }
+            if( (dValue >= 0.) && (dValue <= 1.) )
+            {
+                mapArgs ["-" + param_name]= strprintf("%f", dValue);                                                                
+            }
+            else
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Should be in range (0,1)");                                                
+            }
+        }
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter value type");                                            
+        }
+        fFound=true;
+    }
+    if( (param_name == "lockadminminerounds") ||
+        (param_name == "maxshowndata") ||
+        (param_name == "maxqueryscanitems") ||
+        (param_name == "acceptfiltertimeout") ||
+        (param_name == "sendfiltertimeout") ||
+        (param_name == "dropmessagestest") )
+    {
+        if( (params[1].type() == int_type) || (params[1].type() == str_type) )
+        {
+            int nValue;
+            if(params[1].type() == int_type)
+            {
+                nValue=params[1].get_int();
+            }
+            else
+            {
+                nValue=atoi(params[1].get_str().c_str());
+            }
+            if( nValue >= 0 )
+            {
+                mapArgs ["-" + param_name]=strprintf("%d", nValue);                                
+                if(param_name == "acceptfiltertimeout")
+                {
+                    if(pMultiChainFilterEngine)
+                    {
+                        pMultiChainFilterEngine->SetTimeout(pMultiChainFilterEngine->GetAcceptTimeout());
+                    }
+                }
+            }
+            else
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Should be non-negative");                                                
+            }
+        }
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter value type");                                            
+        }
+        fFound=true;
+    }
+    if( (param_name == "compatibility") )
+    {
+        if( (params[1].type() == int_type) || (params[1].type() == str_type) )
+        {
+            int nValue;
+            if(params[1].type() == int_type)
+            {
+                nValue=params[1].get_int();
+            }
+            else
+            {
+                nValue=atoi(params[1].get_str().c_str());
+            }
+            mc_gState->m_Compatibility=(uint32_t)nValue;
+        }        
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter value type");                                            
+        }
+        fFound=true;
+    }
+    if(param_name == "bantx")
+    {
+        if(params[1].type() == str_type)
+        {
+            string error=SetBannedTxs(params[1].get_str());
+            if(error.size())
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, error);                                                                        
+            }
+            else
+            {
+                mapArgs ["-" + param_name]=params[1].get_str();                                
+            }
+        }   
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter value type");                                                        
+        }
+        fFound=true;
+    }
+    if(param_name == "lockblock")
+    {
+        if(params[1].type() == str_type)
+        {
+            string error=SetLockedBlock(params[1].get_str());
+            if(error.size())
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, error);                                                                        
+            }
+            else
+            {
+                mapArgs ["-" + param_name]=params[1].get_str();                                
+            }
+        }   
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter value type");                                                        
+        }
+        fFound=true;
+    }
+    if(param_name == "handshakelocal")
+    {
+        if(params[1].type() == str_type)
+        {
+            CBitcoinAddress address(params[1].get_str());
+            if (!address.IsValid())    
+            {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");                                                                        
+            }
+            else
+            {
+                mapArgs ["-" + param_name]=params[1].get_str();                                
+            }
+        }   
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter value type");                                                        
+        }
+        fFound=true;
+    }
+    if(param_name == "autosubscribe")
+    {
+        if(params[1].type() == str_type)
+        {
+            string autosubscribe=params[1].get_str();
+            uint32_t mode=MC_WMD_NONE;
+            bool found=false;
+            if(autosubscribe=="streams")
+            {
+                mode |= MC_WMD_AUTOSUBSCRIBE_STREAMS;
+                found=true;
+            }
+            if(autosubscribe=="assets")
+            {
+                mode |= MC_WMD_AUTOSUBSCRIBE_ASSETS;
+                found=true;
+            }
+            if( (autosubscribe=="assets,streams") || (autosubscribe=="streams,assets"))
+            {
+                mode |= MC_WMD_AUTOSUBSCRIBE_STREAMS;
+                mode |= MC_WMD_AUTOSUBSCRIBE_ASSETS;
+                found=true;
+            }              
+            if( autosubscribe=="" )
+            {
+                found=true;
+            }
+            if(!found)
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter value");                                                                        
+            }
+            
+            if(pwalletTxsMain)
+            {
+                pwalletTxsMain->SetMode(mode,MC_WMD_AUTOSUBSCRIBE_STREAMS | MC_WMD_AUTOSUBSCRIBE_ASSETS);
+            }
+            mapArgs ["-" + param_name]=params[1].get_str();                                
+        }   
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter value type");                                                        
+        }
+        fFound=true;
+    }
+    
+    if(!fFound)
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Unsupported runtime parameter: " + param_name);                                                    
+    }
+
+    SetMultiChainRuntimeParams();    
+    
+    return Value::null;
+}    
+
 Value getblockchainparams(const json_spirit::Array& params, bool fHelp)
 {
-    if (fHelp || params.size() > 1)                                            // MCHN
+    if (fHelp || params.size() > 2)                                            // MCHN
         throw runtime_error("Help message not found\n");
 
-    
     bool fDisplay = true;
     if (params.size() > 0)
         fDisplay = params[0].get_bool();
     
+    int nHeight=chainActive.Height();
+    if (params.size() > 1)
+    {
+        if(params[1].type() == bool_type)
+        {
+            if(!params[1].get_bool())
+            {
+                nHeight=0;
+            }
+        }
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "with-upgrades should be boolean");                
+/*            
+            if(params[1].type() == int_type)
+            {
+                nHeight=params[1].get_int();
+            }            
+ */ 
+        }
+    }
+    
+    if (nHeight < 0 || nHeight > chainActive.Height())
+    {
+        nHeight+=chainActive.Height();
+        if (nHeight <= 0 || nHeight > chainActive.Height())
+        {
+            throw JSONRPCError(RPC_BLOCK_NOT_FOUND, "Block height out of range");
+        }
+    }
+    
     Object obj;
     int protocol_version=(int)mc_gState->m_NetworkParams->GetInt64Param("protocolversion");
+    
+    if(nHeight)
+    {
+        protocol_version=mc_gState->m_NetworkParams->ProtocolVersion();
+    }
+
     for(int i=0;i<mc_gState->m_NetworkParams->m_Count;i++)
     {
         if((mc_gState->m_NetworkParams->m_lpParams+i)->IsRelevant(protocol_version))
@@ -197,6 +600,7 @@ Value getblockchainparams(const json_spirit::Array& params, bool fHelp)
             Value param_value;
             unsigned char* ptr;
             int size;
+            bool hidden=false;
             string param_string="";;
 
             ptr=(unsigned char*)mc_gState->m_NetworkParams->GetParam((mc_gState->m_NetworkParams->m_lpParams+i)->m_Name,&size);
@@ -204,17 +608,18 @@ Value getblockchainparams(const json_spirit::Array& params, bool fHelp)
             {
                 ptr=NULL;
             }
+/*            
             else
             {
                 if(((mc_gState->m_NetworkParams->m_lpParams+i)->m_Type & MC_PRM_DATA_TYPE_MASK) == MC_PRM_STRING)
-                {
+                {                    
                     if(size == 1)
                     {
                         ptr=NULL;                    
                     }
                 }
             }
-
+*/
             if(fDisplay)
             {
                 param_name=(mc_gState->m_NetworkParams->m_lpParams+i)->m_DisplayName;
@@ -251,7 +656,18 @@ Value getblockchainparams(const json_spirit::Array& params, bool fHelp)
                     case MC_PRM_INT32:
                         if((mc_gState->m_NetworkParams->m_lpParams+i)->m_Type & MC_PRM_DECIMAL)
                         {
-                            param_value=((double)mc_GetLE(ptr,4))/MC_PRM_DECIMAL_GRANULARITY;
+//                            param_value=((double)(int)mc_GetLE(ptr,4))/MC_PRM_DECIMAL_GRANULARITY;
+                            int n=(int)mc_GetLE(ptr,4);
+                            if(n >= 0)
+                            {
+//                                param_value=((double)n+mc_gState->m_NetworkParams->ParamAccuracy())/MC_PRM_DECIMAL_GRANULARITY;
+                                param_value=((double)n)/MC_PRM_DECIMAL_GRANULARITY;
+                            }
+                            else
+                            {
+//                                param_value=-((double)(-n)+mc_gState->m_NetworkParams->ParamAccuracy())/MC_PRM_DECIMAL_GRANULARITY;                                        
+                                param_value=-((double)(-n))/MC_PRM_DECIMAL_GRANULARITY;                                        
+                            }
                         }
                         else
                         {
@@ -261,11 +677,19 @@ Value getblockchainparams(const json_spirit::Array& params, bool fHelp)
                     case MC_PRM_UINT32:
                         if((mc_gState->m_NetworkParams->m_lpParams+i)->m_Type & MC_PRM_DECIMAL)
                         {
+//                            param_value=((double)mc_GetLE(ptr,4)+mc_gState->m_NetworkParams->ParamAccuracy())/MC_PRM_DECIMAL_GRANULARITY;
                             param_value=((double)mc_GetLE(ptr,4))/MC_PRM_DECIMAL_GRANULARITY;
                         }
                         else
                         {
                             param_value=mc_GetLE(ptr,4);                                                                
+                            if((mc_gState->m_NetworkParams->m_lpParams+i)->m_Type & MC_PRM_HIDDEN)
+                            {
+                                if(mc_GetLE(ptr,4) == (mc_gState->m_NetworkParams->m_lpParams+i)->m_DefaultIntegerValue)
+                                {
+                                    hidden=true;
+                                }
+                            }
                         }
                         break;
                     case MC_PRM_INT64:
@@ -276,8 +700,86 @@ Value getblockchainparams(const json_spirit::Array& params, bool fHelp)
                         break;
                 }
             }
-
-            obj.push_back(Pair(param_name,param_value));        
+            else
+            {
+                param_value=Value::null;
+            }
+            if(nHeight)
+            {
+                if(strcmp("protocolversion",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=mc_gState->m_NetworkParams->m_ProtocolVersion;
+                }
+                if(strcmp("maximumblocksize",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(int)MAX_BLOCK_SIZE;
+                }
+                if(strcmp("targetblocktime",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(int)MCP_TARGET_BLOCK_TIME;
+                }
+                if(strcmp("maxstdtxsize",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(int)MAX_STANDARD_TX_SIZE;
+                }
+                if(strcmp("maxstdopreturnscount",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(int)MCP_MAX_STD_OP_RETURN_COUNT;
+                }
+                if(strcmp("maxstdopreturnsize",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(int)MAX_OP_RETURN_RELAY;
+                }
+                if(strcmp("maxstdopdropscount",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(int)MCP_STD_OP_DROP_COUNT;
+                }
+                if(strcmp("maxstdelementsize",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(int)MAX_SCRIPT_ELEMENT_SIZE;
+                }
+                if(strcmp("maximumchunksize",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(int)MAX_CHUNK_SIZE;
+                }
+                if(strcmp("maximumchunkcount",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(int)MAX_CHUNK_COUNT;
+                }
+                if(strcmp("anyonecanconnect",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(MCP_ANYONE_CAN_CONNECT != 0);
+                }
+                if(strcmp("anyonecansend",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(MCP_ANYONE_CAN_SEND != 0);
+                }
+                if(strcmp("anyonecanreceive",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(MCP_ANYONE_CAN_RECEIVE != 0);
+                }
+                if(strcmp("anyonecanreceiveempty",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(MCP_ANYONE_CAN_RECEIVE_EMPTY != 0);
+                }
+                if(strcmp("anyonecancreate",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(MCP_ANYONE_CAN_CREATE != 0);
+                }
+                if(strcmp("anyonecanissue",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(MCP_ANYONE_CAN_ISSUE != 0);
+                }
+                if(strcmp("anyonecanactivate",(mc_gState->m_NetworkParams->m_lpParams+i)->m_Name) == 0)
+                {
+                    param_value=(MCP_ANYONE_CAN_ACTIVATE != 0);
+                }
+            }
+    
+            if(!hidden)
+            {
+                obj.push_back(Pair(param_name,param_value));        
+            }
         }
     }
     
@@ -307,6 +809,7 @@ void SetSynchronizedFlag(CTxDestination &dest,Object &ret)
             if(entStat.m_Flags & MC_EFL_NOT_IN_SYNC)
             {
                 ret.push_back(Pair("synchronized",false));                                                            
+                ret.push_back(Pair("startblock",entStat.m_LastImportedBlock+1));                                                                            
             }
             else
             {
@@ -356,19 +859,50 @@ Value validateaddress(const Array& params, bool fHelp)
     if (fHelp || params.size() != 1)                                            // MCHN
         throw runtime_error("Help message not found\n");
 
-    CBitcoinAddress address(params[0].get_str());
+    string str=params[0].get_str();
+    CBitcoinAddress address(str);
     bool isValid = address.IsValid();
 
     Object ret;
 /* MCHN START */        
     if(!isValid)
     {
-        ret.push_back(Pair("isvalid", false));        
+        CBitcoinSecret vchSecret;
+        CPubKey pubkey;
+        isValid = vchSecret.SetString(str);
+
+        if (isValid)
+        {
+            CKey key;
+            key = vchSecret.GetKey();
+            isValid=key.IsValid();
+            if (isValid) 
+            {
+                pubkey = key.GetPubKey();
+                isValid=key.VerifyPubKey(pubkey);
+            }
+        }        
+        else
+        {
+            if (IsHex(str))
+            {
+                pubkey=CPubKey(ParseHex(str));
+                isValid=pubkey.IsFullyValid();            
+            }                
+        }        
+        if(isValid)
+        {
+            address=CBitcoinAddress(pubkey.GetID());
+        }        
     }
-    else
+    
+    if(!isValid)
     {
-        return AddressEntry(address,0x03);
+        ret.push_back(Pair("isvalid", false));        
+        return ret;
     }
+    
+    return AddressEntry(address,0x03);
 /*    
     ret.push_back(Pair("isvalid", isValid));
     if (isValid)
@@ -391,7 +925,7 @@ Value validateaddress(const Array& params, bool fHelp)
         
     }
 */   
-    return ret;
+//    return ret;
 /* MCHN END */        
 }
 
@@ -405,18 +939,7 @@ Value createkeypairs(const Array& params, bool fHelp)
     int count=1;
     if (params.size() > 0)    
     {
-        if(params[0].type() == int_type)
-        {
-            count=params[0].get_int();
-            if(count < 0)
-            {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid count"));                            
-            }
-        }
-        else
-        {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, string("Invalid count"));            
-        }
+        count=paramtoint(params[0],true,0,"Invalid count");
     }
             
     Array retArray;
@@ -462,8 +985,9 @@ Value getaddresses(const Array& params, bool fHelp)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid value for 'verbose' parameter, should be boolean");                                                                
         }        
     }
-    
+
     Array ret;
+
     if((mc_gState->m_WalletMode & MC_WMD_TXS))
     {
         int entity_count;
@@ -512,9 +1036,9 @@ Value getaddresses(const Array& params, bool fHelp)
                 }
                 if (pwalletMain && pwalletMain->mapAddressBook.count(dest))
                     addr.push_back(Pair("account", pwalletMain->mapAddressBook[dest].name));
-    /* MCHN START */        
+
                 SetSynchronizedFlag(dest,addr);
-    /* MCHN END */        
+
                 ret.push_back(addr);            
             }
             else
@@ -606,9 +1130,12 @@ Value createmultisig(const Array& params, bool fHelp)
 /* MCHN START */    
     if(mc_gState->m_NetworkParams->IsProtocolMultichain())
     {
-        if(mc_gState->m_NetworkParams->GetInt64Param("allowp2shoutputs") == 0)
+        if((MCP_ALLOW_ARBITRARY_OUTPUTS == 0) || (mc_gState->m_Features->FixedDestinationExtraction() == 0) )
         {
-            throw JSONRPCError(RPC_INVALID_REQUEST, "P2SH outputs are not  allowed for this network");
+            if(MCP_ALLOW_P2SH_OUTPUTS == 0)
+            {
+                throw JSONRPCError(RPC_NOT_ALLOWED, "P2SH outputs are not allowed for this blockchain");
+            }
         }
     }
 /* MCHN END */    
@@ -629,7 +1156,7 @@ Value createmultisig(const Array& params, bool fHelp)
 Value verifymessage(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() != 3)                                            // MCHN
-        throw runtime_error("Help message not found\n");
+        mc_ThrowHelpMessage("verifymessage");
 
     string strAddress  = params[0].get_str();
     string strSign     = params[1].get_str();
@@ -637,17 +1164,17 @@ Value verifymessage(const Array& params, bool fHelp)
 
     CBitcoinAddress addr(strAddress);
     if (!addr.IsValid())
-        throw JSONRPCError(RPC_TYPE_ERROR, "Invalid address");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
 
     CKeyID keyID;
     if (!addr.GetKeyID(keyID))
-        throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to key");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Address does not refer to key");
 
     bool fInvalid = false;
     vector<unsigned char> vchSig = DecodeBase64(strSign.c_str(), &fInvalid);
 
     if (fInvalid)
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Malformed base64 encoding");
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Malformed base64 encoding");
 
     CHashWriter ss(SER_GETHASH, 0);
     ss << strMessageMagic;

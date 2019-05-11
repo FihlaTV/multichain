@@ -1,7 +1,7 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 
@@ -176,6 +176,13 @@ Object ListWalletTransactions(const CWalletTx& wtx, bool fLong, const isminefilt
     Array aPermissions;
     Array aMetaData;
     Array aItems;
+    uint32_t format;
+    unsigned char *chunk_hashes;
+    int chunk_count;   
+    int64_t total_chunk_size,out_size;
+    uint32_t retrieve_status;
+    Array aFormatMetaData;
+    vector<Array> aFormatMetaDataPerOutput;
 
     nIsFromMeCount=GetInputOffer(wtx,addresses,filter,nAmount,amounts,lpScript,&from_addresses,&my_addresses);
     nIsToMeCount=0;
@@ -187,6 +194,8 @@ Object ListWalletTransactions(const CWalletTx& wtx, bool fLong, const isminefilt
         quantity=-quantity;
         mc_SetABQuantity(amounts->GetRow(i),quantity);        
     }
+    
+    aFormatMetaDataPerOutput.resize(wtx.vout.size());
     
     new_entity_type=MC_ENT_TYPE_NONE;
     nIsToMeCount=0;
@@ -243,23 +252,34 @@ Object ListWalletTransactions(const CWalletTx& wtx, bool fLong, const isminefilt
             lpScript->Clear();
             lpScript->SetScript((unsigned char*)(&pc2[0]),(size_t)(script2.end()-pc2),MC_SCR_TYPE_SCRIPTPUBKEY);
             
-            size_t elem_size;
+//        	lpScript->ExtractAndDeleteDataFormat(&format);
+            lpScript->ExtractAndDeleteDataFormat(&format,&chunk_hashes,&chunk_count,&total_chunk_size);
+            
             const unsigned char *elem;
 
             if(lpScript->GetNumElements()<=1)
             {
                 if(lpScript->GetNumElements()==1)
                 {
-                    elem = lpScript->GetData(lpScript->GetNumElements()-1,&elem_size);
-                    aMetaData.push_back(OpReturnEntry(elem,elem_size,wtx.GetHash(),i));
+//                    elem = lpScript->GetData(lpScript->GetNumElements()-1,&elem_size);
+//                    aMetaData.push_back(OpReturnEntry(elem,elem_size,wtx.GetHash(),i));
+                    retrieve_status = GetFormattedData(lpScript,&elem,&out_size,chunk_hashes,chunk_count,total_chunk_size);
+                    Value metadata=OpReturnFormatEntry(elem,out_size,wtx.GetHash(),i,format,NULL,retrieve_status);
+                    aFormatMetaData.push_back(metadata);
+                    aFormatMetaDataPerOutput[i].push_back(metadata);
                 }                        
             }
             else
             {
-                elem = lpScript->GetData(lpScript->GetNumElements()-1,&elem_size);
-                if(elem_size)
+                if(mc_gState->m_Compatibility & MC_VCM_1_0)
                 {
-                    aMetaData.push_back(OpReturnEntry(elem,elem_size,wtx.GetHash(),i));
+//                    elem = lpScript->GetData(lpScript->GetNumElements()-1,&elem_size);
+                    retrieve_status = GetFormattedData(lpScript,&elem,&out_size,chunk_hashes,chunk_count,total_chunk_size);
+                    if(out_size)
+                    {
+    //                    aMetaData.push_back(OpReturnEntry(elem,elem_size,wtx.GetHash(),i));
+                        aFormatMetaData.push_back(OpReturnFormatEntry(elem,out_size,wtx.GetHash(),i,format,NULL,retrieve_status));
+                    }
                 }
                 
                 lpScript->SetElement(0);
@@ -312,7 +332,7 @@ Object ListWalletTransactions(const CWalletTx& wtx, bool fLong, const isminefilt
             {
                 total=1;
                 uint256 txid=wtx.GetHash();
-                asset_entry=AssetEntry((unsigned char*)&txid,-total,7);                        
+                asset_entry=AssetEntry((unsigned char*)&txid,-total,0x83);                        
                 txnouttype typeRet;
                 int nRequiredRet;
                 vector<CTxDestination> addressRets;
@@ -370,7 +390,18 @@ Object ListWalletTransactions(const CWalletTx& wtx, bool fLong, const isminefilt
                 aTxOutItems.push_back(data_item_entry);
             }
             Object txout_entry=TxOutEntry(wtx.vout[i],i,TxIn,wtx.GetHash(),amounts,lpScript);
-            txout_entry.push_back(Pair("items", aTxOutItems));
+            if( (aTxOutItems.size() > 0) || (mc_gState->m_Compatibility & MC_VCM_1_0) )
+            {
+                txout_entry.push_back(Pair("items", aTxOutItems));
+            }
+            if( (mc_gState->m_Compatibility & MC_VCM_1_0) == 0)
+            {
+                if(aFormatMetaDataPerOutput[i].size())
+                {
+                    txout_entry.push_back(Pair("data", aFormatMetaDataPerOutput[i]));                    
+                }
+            }
+            
             vout.push_back(txout_entry);
         }
     }        
@@ -425,11 +456,12 @@ Object ListWalletTransactions(const CWalletTx& wtx, bool fLong, const isminefilt
         if(new_entity_type == MC_ENT_TYPE_ASSET)
         {
             uint256 txid=wtx.GetHash();
-            entry.push_back(Pair("issue", AssetEntry((unsigned char*)&txid,-total,7)));
+            entry.push_back(Pair("issue", AssetEntry((unsigned char*)&txid,-total,0x83)));
         }        
     }
     entry.push_back(Pair("items", aItems));
-    entry.push_back(Pair("data", aMetaData));
+        
+    entry.push_back(Pair("data", aFormatMetaData));
     
     WalletTxToJSON(wtx, entry, true);
 
@@ -471,16 +503,14 @@ Value listwallettransactions(const Array& params, bool fHelp)
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Negative from");
 
     
-    mc_Buffer *asset_amounts;
-    asset_amounts=new mc_Buffer;
-    mc_InitABufferMap(asset_amounts);
+    mc_Buffer *asset_amounts=mc_gState->m_TmpBuffers->m_RpcABBuffer1;
+    asset_amounts->Clear();
     
-    mc_Script *lpScript;
-    lpScript=new mc_Script;    
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();    
     
-    mc_Buffer *entity_rows;
-    entity_rows=new mc_Buffer;
-    entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
+    mc_Buffer *entity_rows=mc_gState->m_TmpBuffers->m_RpcEntityRows;
+    entity_rows->Clear();
     
     Array ret;
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
@@ -497,7 +527,7 @@ Value listwallettransactions(const Array& params, bool fHelp)
         {
             wallet_by_time.m_EntityType |= MC_TET_WALLET_SPENDABLE;            
         }
-        pwalletTxsMain->GetList(&wallet_by_time,-nFrom,nCount,entity_rows);
+        CheckWalletError(pwalletTxsMain->GetList(&wallet_by_time,-nFrom,nCount,entity_rows));
         for(int i=0;i<entity_rows->GetCount();i++)
         {
             lpEntTx=(mc_TxEntityRow*)entity_rows->GetRow(i);
@@ -548,11 +578,6 @@ Value listwallettransactions(const Array& params, bool fHelp)
     }
 
     
-    delete lpScript;
-    delete asset_amounts;
-    delete entity_rows;
-    
-    
     return ret;
 }
 
@@ -579,12 +604,11 @@ Value listaddresstransactions(const Array& params, bool fHelp)
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Negative from");
 
     
-    mc_Buffer *asset_amounts;
-    asset_amounts=new mc_Buffer;
-    mc_InitABufferMap(asset_amounts);
+    mc_Buffer *asset_amounts=mc_gState->m_TmpBuffers->m_RpcABBuffer1;
+    asset_amounts->Clear();
     
-    mc_Script *lpScript;
-    lpScript=new mc_Script;    
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();    
     
     vector<CTxDestination> fromaddresses;        
     
@@ -595,7 +619,7 @@ Value listaddresstransactions(const Array& params, bool fHelp)
     
     if(fromaddresses.size() != 1)
     {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Single from-address should be specified");                        
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Single address should be specified");                        
     }
     
     set<CTxDestination> thisFromAddresses;
@@ -613,10 +637,9 @@ Value listaddresstransactions(const Array& params, bool fHelp)
     }
     
     
-    mc_Buffer *entity_rows;
-    entity_rows=new mc_Buffer;
-    entity_rows->Initialize(MC_TDB_ENTITY_KEY_SIZE,MC_TDB_ROW_SIZE,MC_BUF_MODE_DEFAULT);
-    
+    mc_Buffer *entity_rows=mc_gState->m_TmpBuffers->m_RpcEntityRows;
+    entity_rows->Clear();
+
     Array ret;
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
@@ -635,7 +658,7 @@ Value listaddresstransactions(const Array& params, bool fHelp)
             memcpy(address_by_time.m_EntityID,lpScriptID,MC_TDB_ENTITY_ID_SIZE);
             address_by_time.m_EntityType=MC_TET_SCRIPT_ADDRESS | MC_TET_TIMERECEIVED;
         }
-        pwalletTxsMain->GetList(&address_by_time,-nFrom,nCount,entity_rows);
+        CheckWalletError(pwalletTxsMain->GetList(&address_by_time,-nFrom,nCount,entity_rows));
         for(int i=0;i<entity_rows->GetCount();i++)
         {
             lpEntTx=(mc_TxEntityRow*)entity_rows->GetRow(i);
@@ -686,11 +709,6 @@ Value listaddresstransactions(const Array& params, bool fHelp)
         std::reverse(ret.begin(), ret.end()); // Return oldest to newest
     }
     
-    delete lpScript;
-    delete asset_amounts;
-    delete entity_rows;
-    
-    
     return ret;
 }
 
@@ -716,20 +734,19 @@ Value getwallettransaction(const Array& params, bool fHelp)
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
         if(pwalletTxsMain->FindWalletTx(hash,NULL))
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid or non-wallet transaction id");
+            throw JSONRPCError(RPC_TX_NOT_FOUND, "Invalid or non-wallet transaction id");
     }
     else
     {
         if (!pwalletMain->mapWallet.count(hash))
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid or non-wallet transaction id");
+            throw JSONRPCError(RPC_TX_NOT_FOUND, "Invalid or non-wallet transaction id");
     }
 
-    mc_Buffer *asset_amounts;
-    asset_amounts=new mc_Buffer;
-    mc_InitABufferMap(asset_amounts);
+    mc_Buffer *asset_amounts=mc_gState->m_TmpBuffers->m_RpcABBuffer1;
+    asset_amounts->Clear();
     
-    mc_Script *lpScript;
-    lpScript=new mc_Script;    
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();
     
     Object entry;
     
@@ -744,12 +761,9 @@ Value getwallettransaction(const Array& params, bool fHelp)
         entry=ListWalletTransactions(wtx,fLong,filter,NULL,asset_amounts,lpScript);
     }
         
-    delete lpScript;
-    delete asset_amounts;
-    
     if(entry.size() == 0)
     {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Wallet addresses with specified criteria are not involved in transaction");                                
+        throw JSONRPCError(RPC_TX_NOT_FOUND, "Wallet addresses with specified criteria are not involved in transaction");                                
     }
     
     
@@ -774,21 +788,20 @@ Value getaddresstransaction(const Array& params, bool fHelp)
     if(mc_gState->m_WalletMode & MC_WMD_ADDRESS_TXS)
     {
         if(pwalletTxsMain->FindWalletTx(hash,NULL))
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid or non-wallet transaction id");
+            throw JSONRPCError(RPC_TX_NOT_FOUND, "Invalid or non-wallet transaction id");
     }
     else
     {
         if (!pwalletMain->mapWallet.count(hash))
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid or non-wallet transaction id");
+            throw JSONRPCError(RPC_TX_NOT_FOUND, "Invalid or non-wallet transaction id");
     }
 
     
-    mc_Buffer *asset_amounts;
-    asset_amounts=new mc_Buffer;
-    mc_InitABufferMap(asset_amounts);
+    mc_Buffer *asset_amounts=mc_gState->m_TmpBuffers->m_RpcABBuffer1;
+    asset_amounts->Clear();
     
-    mc_Script *lpScript;
-    lpScript=new mc_Script;    
+    mc_Script *lpScript=mc_gState->m_TmpBuffers->m_RpcScript3;
+    lpScript->Clear();    
     
     vector<CTxDestination> fromaddresses;        
     
@@ -799,7 +812,7 @@ Value getaddresstransaction(const Array& params, bool fHelp)
     
     if(fromaddresses.size() != 1)
     {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Single from-address should be specified");                        
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Single address should be specified");                        
     }
     
     set<CTxDestination> thisFromAddresses;
@@ -830,11 +843,8 @@ Value getaddresstransaction(const Array& params, bool fHelp)
     
     if(entry.size() == 0)
     {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Specified address is not involved in transaction");                                
+        throw JSONRPCError(RPC_TX_NOT_FOUND, "This transaction was not found for this address");                                
     }
-    
-    delete lpScript;
-    delete asset_amounts;
     
     return entry;
 }

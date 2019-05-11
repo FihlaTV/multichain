@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "chain/merkleblock.h"
@@ -94,10 +94,16 @@ uint256 CPartialMerkleTree::TraverseAndExtract(int height, unsigned int pos, uns
     } else {
         // otherwise, descend into the subtrees to extract matched txids and hashes
         uint256 left = TraverseAndExtract(height-1, pos*2, nBitsUsed, nHashUsed, vMatch), right;
-        if (pos*2+1 < CalcTreeWidth(height-1))
+        if (pos*2+1 < CalcTreeWidth(height-1)) {
             right = TraverseAndExtract(height-1, pos*2+1, nBitsUsed, nHashUsed, vMatch);
-        else
+            if (right == left) {
+                // The left and right branches should never be identical, as the transaction
+                // hashes covered by them must each be unique.
+                fBad = true;
+            }
+        } else {
             right = left;
+        }
         // and combine them before returning
         return Hash(BEGIN(left), END(left), BEGIN(right), END(right));
     }

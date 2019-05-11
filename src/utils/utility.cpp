@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "multichain/multichain.h"
@@ -89,6 +89,20 @@ int64_t mc_GetLE(void *src,int size)
     return result;                                                              // Assuming all systems are little endian
 }
 
+uint32_t mc_SwapBytes32(uint32_t src)
+{
+    uint32_t res=0;
+    unsigned char *pr;
+    unsigned char *ps;
+    pr=(unsigned char*)&res;
+    ps=(unsigned char*)&src;
+    for(int i=0;i<4;i++)
+    {
+        pr[3-i]=ps[i];        
+    }
+    return res;
+}
+
 void mc_print(const char *message)
 {
     printf("%s\n",message);
@@ -150,7 +164,11 @@ void mc_MemoryDump(void *ptr,                                                   
     
     for(i=0;i<n;i++)
     {
+#ifdef MAC_OSX
+        printf("%4d %08X: ",k,(unsigned int)(size_t)dptr);
+#else        
         printf("%4d %08X: ",k,(unsigned int)(unsigned int64_t)dptr);
+#endif        
         for(j=0;j<4;j++)
         {
             if(k<len)
@@ -275,6 +293,11 @@ void mc_Dump(const char * message,const void *ptr,int size)
 void mc_RandomSeed(unsigned int seed)
 {
     srand(seed);
+}
+
+double mc_RandomDouble()
+{
+    return (double)rand()/RAND_MAX;
 }
 
 unsigned int mc_RandomInRange(unsigned int min,unsigned int max)
@@ -428,7 +451,14 @@ int mc_Buffer::Add(const void *lpKey,const void *lpValue)
     
     if(m_KeySize<m_RowSize)
     {
-        memcpy(m_lpData+m_Size+m_KeySize,lpValue,m_RowSize-m_KeySize);
+        if(lpValue)
+        {
+            memcpy(m_lpData+m_Size+m_KeySize,lpValue,m_RowSize-m_KeySize);
+        }
+        else
+        {
+            memset(m_lpData+m_Size+m_KeySize,0,m_RowSize-m_KeySize);
+        }
     }
         
     m_Size+=m_RowSize;
@@ -446,6 +476,21 @@ int mc_Buffer::Add(const void *lpKey,const void *lpValue)
 int mc_Buffer::Add(const void *lpKeyValue)
 {
     return Add(lpKeyValue,(unsigned char*)lpKeyValue+m_KeySize);
+}
+
+int mc_Buffer::UpdateRow(int RowID,const void *lpKey,const void *lpValue)
+{
+    if(RowID>=m_Count)
+    {
+        return MC_ERR_INTERNAL_ERROR;
+    }
+    
+    if(m_lpIndex)
+    {
+        m_lpIndex->Remove((char*)GetRow(RowID),m_RowSize-m_KeySize);
+    }
+    
+    return PutRow(RowID,lpKey,lpValue);
 }
 
 int mc_Buffer::PutRow(int RowID,const void *lpKey,const void *lpValue)
@@ -471,7 +516,14 @@ int mc_Buffer::PutRow(int RowID,const void *lpKey,const void *lpValue)
     
     if(m_lpIndex)
     {
-        m_lpIndex->Add((unsigned char*)lpKey,m_KeySize,RowID);
+        if(m_lpIndex->Get((unsigned char*)lpKey,m_KeySize) >= 0)
+        {
+            m_lpIndex->Set((unsigned char*)lpKey,m_KeySize,RowID);            
+        }
+        else
+        {
+            m_lpIndex->Add((unsigned char*)lpKey,m_KeySize,RowID);
+        }
     }
     
     return MC_ERR_NOERROR;
@@ -1672,7 +1724,9 @@ int mc_SaveCliCommandToLog(const char *fileName, int argc, char* argv[])
             {
                 if((strcmp(argv[a],"encryptwallet") == 0) ||
                    (strcmp(argv[a],"walletpassphrase") == 0) ||    
-                   (strcmp(argv[a],"walletpassphrasechange") == 0))
+                   (strcmp(argv[a],"walletpassphrasechange") == 0) || 
+                   (strcmp(argv[a],"signrawtransaction") == 0) || 
+                   (strcmp(argv[a],"importprivkey") == 0))
                 {
                     return 0;
                 }
@@ -1856,5 +1910,16 @@ void mc_AdjustStartAndCount(int *count,int *start,int size)
             *count=size-*start;
         }
     }    
+}
+
+void sprintf_hex(char *hex,const unsigned char *bin,int size)
+{
+    int i;
+    for(i=0;i<size;i++)
+    {
+        sprintf(hex+(i*2),"%02x",bin[size-1-i]);
+    }
+    
+    hex[size*2]=0;      
 }
 

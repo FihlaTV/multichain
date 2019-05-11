@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "multichain/multichain.h"
@@ -38,6 +38,7 @@
 #include <dlfcn.h>  // We need if of dlopen
 #include <unistd.h> // We need it for sleep
 
+#include <pwd.h>
 
 #include "utils/define.h"
 #include "utils/declare.h"
@@ -121,13 +122,33 @@ void* __US_SemCreate()
     
     lpsem=NULL;
     
+#ifdef MAC_OSX
+    // Create a unique name for the named semaphore
+    static const char alphanum[] =
+        "0123456789"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz";
+    int namelen = 20;
+    char name[namelen + 1];
+    for (int i = 0; i < namelen; ++i) {
+        name[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
+    }
+    name[namelen] = 0;
+
+    // Create named semaphore as unnamed semaphores are deprecated on OS X.
+    lpsem = sem_open(name, O_CREAT | O_EXCL, 0666, 1);
+    if (lpsem == SEM_FAILED) {
+        return NULL;
+    }
+#else
+    
     lpsem=new sem_t;
     if(sem_init(lpsem,0666,1))
     {
         delete lpsem;
         return NULL;
     }
-
+#endif
     return (void*)lpsem;
 }
 
@@ -149,12 +170,16 @@ void __US_SemPost(void* sem)
 
 void __US_SemDestroy(void* sem)
 {
+#ifndef MAC_OSX
     sem_t *lpsem;
+#endif    
     if(sem)
     {
         sem_close((sem_t*)sem);
+#ifndef MAC_OSX
         lpsem=(sem_t*)sem;
         delete lpsem;
+#endif    
     }
 }
 
@@ -163,6 +188,82 @@ uint64_t __US_ThreadID()
     return (uint64_t)pthread_self();
 }
 
+const char* __US_UserHomeDir()
+{
+    const char *homedir;
+
+    if ((homedir = getenv("HOME")) == NULL) 
+    {
+        homedir = getpwuid(getuid())->pw_dir;
+    }    
+    
+    return homedir;
+}
+
+char * __US_FullPath(const char* path, char *full_path, int len)
+{
+    full_path[0]=0x00;
+    
+    if(strlen(path) > 1)
+    {
+        if( (path[0] == '~') && (path[1] == '/') )
+        {
+            const char *homedir=__US_UserHomeDir();
+
+            sprintf(full_path,"%s%s",homedir,path+1);
+            
+            return full_path;
+        }
+    }
+    
+    char *res= realpath(path, full_path); 
+    if(res == NULL)
+    {
+        res=NULL;
+    }
+    return full_path;
+}
+
+void __US_FlushFile(int FileHan)
+{
+    fsync(FileHan);
+}
+
+void __US_FlushFileWithMode(int FileHan,uint32_t use_data_sync)
+{
+    if(use_data_sync)
+    {
+#ifdef MAC_OSX
+        fcntl(FileHan, F_FULLFSYNC, 0);
+#else
+        fdatasync(FileHan);
+#endif        
+    }
+    else
+    {
+        fsync(FileHan);
+    }
+}
+
+int __US_LockFile(int FileHan)
+{
+    return flock(FileHan,LOCK_EX);
+}
+
+int __US_UnLockFile(int FileHan)
+{
+    return flock(FileHan,LOCK_UN);
+}
+
+int __US_DeleteFile(const char *file_name)
+{
+    return unlink(file_name);
+}
+
+int __US_GetPID()
+{
+    return getpid();
+}
 #else
 
 #include "windows.h"
@@ -220,6 +321,63 @@ void __US_SemDestroy(void* sem)
 uint64_t __US_ThreadID()
 {
     return (uint64_t)GetCurrentThreadId ();
+}
+
+const char* __US_UserHomeDir()
+{
+    return NULL;
+}
+
+char * __US_FullPath(const char* path, char *full_path, int len)
+{
+    return _fullpath(full_path,path,len);
+}
+
+void __US_FlushFile(int FileHan)
+{
+    HANDLE hFile = (HANDLE)_get_osfhandle(FileHan);
+    FlushFileBuffers(hFile);
+}
+
+void __US_FlushFileWithMode(int FileHan,uint32_t use_data_sync)
+{
+    HANDLE hFile = (HANDLE)_get_osfhandle(FileHan);
+    FlushFileBuffers(hFile);
+}
+
+int __US_LockFile(int FileHan)
+{
+    HANDLE hFile = (HANDLE)_get_osfhandle(FileHan);
+    OVERLAPPED overlapvar = { 0 };
+
+    if(LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                                0, MAXDWORD, MAXDWORD, &overlapvar))
+    {
+        return 0;
+    }        
+    return -1;
+}
+
+int __US_UnLockFile(int FileHan)
+{
+    HANDLE hFile = (HANDLE)_get_osfhandle(FileHan);
+    OVERLAPPED overlapvar = { 0 };
+
+    if(UnlockFileEx(hFile, 0, MAXDWORD, MAXDWORD, &overlapvar))
+    {
+        return 0;
+    }        
+    return -1;
+}
+
+int __US_DeleteFile(const char *file_name)
+{
+    return (int)DeleteFile(file_name);
+}
+
+int __US_GetPID()
+{
+    return (int)GetCurrentProcessId();
 }
 
 #endif

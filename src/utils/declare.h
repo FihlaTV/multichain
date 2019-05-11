@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef MULTICHAIN_DECLARE_H
@@ -35,6 +35,7 @@ typedef struct mc_MapStringIndex
     void Remove(const char* key,int size);
     int Get(const char* key);
     int Get(const unsigned char* key,int size);
+    void Set(const unsigned char* key,int size,int value);
     void Destroy();
     void Clear();
 } mc_MapStringIndex;
@@ -90,6 +91,7 @@ typedef struct mc_Buffer
     int Seek(void *lpKey);
     unsigned char *GetRow(int RowID);    
     int PutRow(int RowID,const void *lpKey,const void *lpValue);    
+    int UpdateRow(int RowID,const void *lpKey,const void *lpValue);    
     int GetCount();    
     int SetCount(int count);
     
@@ -137,6 +139,8 @@ typedef struct mc_SHA256
     void Reset();
     void Write(const void *lpData,int size);
     void GetHash(unsigned char *hash);
+    
+    void DoubleHash(const void *lpData,int size,void *hash);
     
     mc_SHA256()
     {
@@ -204,6 +208,7 @@ void *mc_New(int Size);
 void mc_Delete(void *ptr);
 void mc_PutLE(void *dest,void *src,int dest_size);
 int64_t mc_GetLE(void *src,int size);
+uint32_t mc_SwapBytes32(uint32_t src);
 int mc_BackupFile(const char *network_name,const char *filename, const char *extension,int options);
 int mc_RecoverFile(const char *network_name,const char *filename, const char *extension,int options);
 FILE *mc_OpenFile(const char *network_name,const char *filename, const char *extension,const char *mode, int options);        
@@ -222,23 +227,29 @@ void mc_MemoryDumpCharSize(const void *ptr,int from,int len,int row_size);
 void mc_MemoryDumpCharSizeToFile(FILE *fHan,const void *ptr, int from, int len,int row_size);          
 void mc_DumpSize(const char * message,const void *ptr,int size,int row_size);
 void mc_RandomSeed(unsigned int seed);
+double mc_RandomDouble();
 unsigned int mc_RandomInRange(unsigned int min,unsigned int max);
 unsigned int mc_TimeNowAsUInt();
 double mc_TimeNowAsDouble();
 int mc_GetFullFileName(const char *network_name,const char *filename, const char *extension,int options,char *buf);
 int64_t mc_GetVarInt(const unsigned char *buf,int max_size,int64_t default_value,int* shift);
 int mc_PutVarInt(unsigned char *buf,int max_size,int64_t value);
+int mc_BuildDescription(int build, char *desc);
 
 void mc_GetCompoundHash160(void *result,const void  *hash1,const void  *hash2);
 int mc_SetIPv4ServerAddress(const char* host);
 int mc_FindIPv4ServerAddress(uint32_t *all_ips,int max_ips);
 int mc_GenerateConfFiles(const char *network_name);
+void mc_CreateDir(const char *dir_name);
 void mc_RemoveDataDir(const char *network_name);
 void mc_RemoveDir(const char *network_name,const char *dir_name);
 int mc_GetDataDirArg(char *buf);
 void mc_UnsetDataDirArg();
 void mc_SetDataDirArg(char *buf);
+void mc_ExpandDataDirParam();
+void mc_CheckDataDirInConfFile();
 void mc_AdjustStartAndCount(int *count,int *start,int size);
+void* custom_get_blockchain_default(const char *param,int* size,void *param_in);
 
 
 int mc_TestScenario(char* scenario_file);
@@ -250,6 +261,7 @@ void mc_StringLowerCase(char *buf,uint32_t len);
 int mc_StringCompareCaseInsensitive(const char *str1,const char *str2,int len);
 
 uint32_t mc_GetParamFromDetailsScript(const unsigned char *ptr,uint32_t total,uint32_t offset,uint32_t* param_value_start,size_t *bytes);
+uint32_t mc_GetParamFromDetailsScriptErr(const unsigned char *ptr,uint32_t total,uint32_t offset,uint32_t* param_value_start,size_t *bytes, int *err);
 uint32_t mc_FindSpecialParamInDetailsScript(const unsigned char *ptr,uint32_t total,uint32_t param,size_t *bytes);
 uint32_t mc_FindNamedParamInDetailsScript(const unsigned char *ptr,uint32_t total,const char *param,size_t *bytes);
 
@@ -269,6 +281,16 @@ void __US_SemWait(void* sem);
 void __US_SemPost(void* sem);
 void __US_SemDestroy(void* sem);
 uint64_t __US_ThreadID();
+const char* __US_UserHomeDir();
+char * __US_FullPath(const char* path, char *full_path, int len);
+void __US_FlushFile(int FileHan);
+void __US_FlushFileWithMode(int FileHan,uint32_t use_data_sync);
+int __US_LockFile(int FileHan);
+int __US_UnLockFile(int FileHan);
+int __US_DeleteFile(const char *file_name);
+int __US_GetPID();
+void sprintf_hex(char *hex,const unsigned char *bin,int size);
+
 
 
 #ifdef	__cplusplus

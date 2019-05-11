@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #if defined(HAVE_CONFIG_H)
@@ -177,7 +177,7 @@ static void DebugPrintInit()
     assert(fileout == NULL);
     assert(mutexDebugLog == NULL);
 
-    boost::filesystem::path pathDebug = GetDataDir() / "debug.log";
+    boost::filesystem::path pathDebug = GetLogDir() / "debug.log";
     fileout = fopen(pathDebug.string().c_str(), "a");
     if (fileout) setbuf(fileout, NULL); // unbuffered
 
@@ -247,7 +247,7 @@ int LogPrintStr(const std::string &str)
         // reopen the log file, if requested
         if (fReopenDebugLog) {
             fReopenDebugLog = false;
-            boost::filesystem::path pathDebug = GetDataDir() / "debug.log";
+            boost::filesystem::path pathDebug = GetLogDir() / "debug.log";
             if (freopen(pathDebug.string().c_str(),"a",fileout) != NULL)
                 setbuf(fileout, NULL); // unbuffered
         }
@@ -413,6 +413,7 @@ void PrintExceptionContinue(std::exception* pex, const char* pszThread)
 
 /* MCHN START */
 static boost::filesystem::path pathCachedMultiChain;
+static boost::filesystem::path pathCachedMultiChainLog;
 static CCriticalSection csPathCached;
 /* MCHN END */
 
@@ -457,6 +458,19 @@ static boost::filesystem::path pathCached;
 static boost::filesystem::path pathCachedNetSpecific;
 //static CCriticalSection csPathCached;
 
+const boost::filesystem::path &GetLogDir(bool fNetSpecific)
+{
+    namespace fs = boost::filesystem;
+    
+    LOCK(csPathCached);
+
+/* MCHN START */
+    fs::path &path =pathCachedMultiChainLog;
+    if (!path.empty())
+        return path;
+    path=fs::path(string(mc_gState->m_Params->DataDir(2,1)));
+    return pathCachedMultiChainLog;
+}
 
 const boost::filesystem::path &GetDataDir(bool fNetSpecific)
 {
@@ -538,7 +552,7 @@ void ReadConfigFile(map<string, string>& mapSettingsRet,
     ClearDatadirCache();
 }
 
-#ifndef WIN32
+//#ifndef WIN32
 boost::filesystem::path GetPidFile()
 {
     boost::filesystem::path pathPidFile(GetArg("-pid", "multichain.pid"));
@@ -546,7 +560,7 @@ boost::filesystem::path GetPidFile()
     return pathPidFile;
 }
 
-void CreatePidFile(const boost::filesystem::path &path, pid_t pid)
+void CreatePidFile(const boost::filesystem::path &path, int pid)
 {
     FILE* file = fopen(path.string().c_str(), "w");
     if (file)
@@ -555,7 +569,7 @@ void CreatePidFile(const boost::filesystem::path &path, pid_t pid)
         fclose(file);
     }
 }
-#endif
+//#endif
 
 bool RenameOver(boost::filesystem::path src, boost::filesystem::path dest)
 {
@@ -684,7 +698,7 @@ void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length) {
 void ShrinkDebugFile(const char* FileName)
 {
     // Scroll debug.log if it's getting too big
-    boost::filesystem::path pathLog = GetDataDir() / string(FileName);
+    boost::filesystem::path pathLog = GetLogDir() / string(FileName);
     FILE* file = fopen(pathLog.string().c_str(), "r");
 /* MCHN START */    
     size_t bytes_written;
@@ -724,9 +738,10 @@ void ShrinkDebugFile()
 {
     ShrinkDebugFile("debug.log");
     ShrinkDebugFile("permissions.log");
+    ShrinkDebugFile("wallet/txs.log");
     // Scroll debug.log if it's getting too big
 /*    
-    boost::filesystem::path pathLog = GetDataDir() / "debug.log";
+    boost::filesystem::path pathLog = GetLogDir() / "debug.log";
     FILE* file = fopen(pathLog.string().c_str(), "r");
     int64_t shrink_size=GetArg("-shrinkdebugfilesize",200000);
     if(shrink_size > 67108864)
@@ -851,4 +866,96 @@ void SetThreadPriority(int nPriority)
     setpriority(PRIO_PROCESS, 0, nPriority);
 #endif // PRIO_THREAD
 #endif // WIN32
+}
+
+
+std::string mc_SupportedProtocols()
+{
+    std::string protocol_list;
+    int protocol_min,protocol_max,protocol_next,this_build,next_build,out_it;
+    
+    protocol_list="";
+    this_build=mc_gState->GetNumericVersion();
+    protocol_next=mc_gState->MinProtocolVersion();
+    protocol_min=0;
+    protocol_max=-1;
+    next_build=-mc_gState->VersionInfo(protocol_next);
+    
+    while(next_build <= this_build)
+    {
+        out_it=0;
+        if(next_build > 0)
+        {
+            if(next_build == this_build)
+            {
+                if(protocol_min == 0)
+                {
+                    protocol_min=protocol_next;                    
+                }
+                protocol_max=protocol_next;
+            }
+            else
+            {
+                out_it=1;
+            }
+            protocol_next++;
+        }
+        else
+        {
+            out_it=1;   
+            protocol_next=-next_build;
+        }
+        next_build=-mc_gState->VersionInfo(protocol_next);
+        if(next_build > this_build)
+        {
+            out_it=1;
+        }
+        if(out_it)
+        {
+            if(protocol_list.size())
+            {
+                protocol_list += ", ";
+            }
+            if(protocol_max > protocol_min)
+            {
+                protocol_list += strprintf("%d-%d",protocol_min,protocol_max);
+            }
+            else
+            {
+                protocol_list += strprintf("%d",protocol_min);                
+            }
+            protocol_min=0;
+            protocol_max=-1;
+        }
+    }
+    
+    
+    return protocol_list;    
+}
+
+std::string mc_BuildDescription(int build)
+{
+    char build_desc[32];
+    mc_BuildDescription(build,build_desc);
+    return std::string(build_desc);
+}
+
+bool mc_CopyFile(boost::filesystem::path& pathDBOld,boost::filesystem::path& pathDBNew)
+{
+#ifndef WIN32
+    
+    try {
+#if BOOST_VERSION >= 104000
+                    boost::filesystem::copy_file(pathDBOld, pathDBNew, boost::filesystem::copy_option::overwrite_if_exists);
+#else
+                    filesystem::copy_file(pathSrc, pathDest);
+#endif
+    } catch(const boost::filesystem::filesystem_error &e) {
+        LogPrintf("error copying %s to %s - %s\n", pathDBOld.string(), pathDBNew.string(), e.what());
+        return false;
+    }
+    return true;
+#else
+    return CopyFile(pathDBOld.string().c_str(),pathDBNew.string().c_str(),false);
+#endif
 }

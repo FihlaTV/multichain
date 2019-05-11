@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT/X11 software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "chain/pow.h"
@@ -82,7 +82,7 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
     return bnNew.GetCompact();
 }
 
-bool CheckProofOfWork(uint256 hash, unsigned int nBits)
+bool CheckProofOfWork(uint256 hash, unsigned int nBits,bool fNoErrorInLog)
 {
     bool fNegative;
     bool fOverflow;
@@ -97,9 +97,18 @@ bool CheckProofOfWork(uint256 hash, unsigned int nBits)
     if (fNegative || bnTarget == 0 || fOverflow || bnTarget > Params().ProofOfWorkLimit())
         return error("CheckProofOfWork() : nBits below minimum work");
 
-    // Check proof of work matches claimed amount
+    // Check proof of work matches claimed amount    
     if (hash > bnTarget)
-        return error("CheckProofOfWork() : hash doesn't match nBits");
+    {
+        if(fNoErrorInLog)
+        {
+            return false;
+        }
+        else
+        {
+            return error("CheckProofOfWork() : hash doesn't match nBits");            
+        }
+    }
 
     return true;
 }

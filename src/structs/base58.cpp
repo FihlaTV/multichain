@@ -1,6 +1,6 @@
 // Copyright (c) 2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "structs/base58.h"
@@ -67,8 +67,148 @@ bool DecodeBase58(const char* psz, std::vector<unsigned char>& vch)
         vch.push_back(*(it++));
     return true;
 }
-
 std::string EncodeBase58(const unsigned char* pbegin, const unsigned char* pend)
+{
+    // Skip & count leading zeroes.
+    int i,j,k;
+    int zeroes = 0;
+    while (pbegin != pend && *pbegin == 0) {
+        pbegin++;
+        zeroes++;
+    }
+        
+    int b58_size=(pend - pbegin) * 138 / 100 + 1;// log(256) / log(58), rounded up.
+    int bx_power=5;
+    int64_t bx_base=656356768;//58^5    
+    int bx_size=(b58_size-1)/bx_power+1;
+    int bin_power=4;
+    int64_t bin_base=4294967296;
+    int bin_size=(pend - pbegin-1)/bin_power + 1;    
+    
+    // Allocate enough space in big-endian base58 representation.
+    std::vector<uint32_t> bin(bin_size); 
+    std::vector<unsigned char> b58(b58_size); 
+    std::vector<int64_t> bx(bx_size); 
+    
+    const unsigned char* pfirst=pend-bin_size*bin_power;
+    while (pbegin != pend) {
+        if(pbegin >= pfirst)
+        {
+            bin[(pbegin-pfirst)/bin_power] |= (*pbegin) << ((bin_power - 1 - (pbegin-pfirst)%bin_power) * 8);
+        }
+        pbegin++;
+    }
+    
+    // Process the uint32_ts.
+    for(i=0;i<bin_size;i++)
+    {
+        int64_t carry = bin[i];
+        // Apply "b58 = b58 * 256 + ch".
+        for (std::vector<int64_t>::reverse_iterator it = bx.rbegin(); it != bx.rend(); it++) {
+            carry += bin_base * (*it);
+            *it = carry % bx_base;
+            carry /= bx_base;
+        }
+        assert(carry == 0);
+//        pbegin++;
+    }
+    
+    k=b58_size;
+    i=bx_size;
+    j=0;
+    int64_t value=0;
+    while(k > 0)
+    {
+        k--;
+        if(j == 0)
+        {
+            i--;
+            j=bx_power;
+            value=bx[i];            
+        }
+        b58[k]=(unsigned char)(value%58);
+        value/=58;
+        j--;
+    }
+    
+    // Skip leading zeroes in base58 result.
+    std::vector<unsigned char>::iterator it = b58.begin();
+    while (it != b58.end() && *it == 0)
+        it++;
+    // Translate the result into a string.
+    std::string str;
+    str.reserve(zeroes + (b58.end() - it));
+    str.assign(zeroes, '1');
+    while (it != b58.end())
+        str += pszBase58[*(it++)];
+    return str;
+}
+
+std::string EncodeBase58_19(const unsigned char* pbegin, const unsigned char* pend)
+{
+    // Skip & count leading zeroes.
+    int zeroes = 0;
+    while (pbegin != pend && *pbegin == 0) {
+        pbegin++;
+        zeroes++;
+    }
+    
+    int b58_size=(pend - pbegin) * 138 / 100 + 1;// log(256) / log(58), rounded up.
+    int bx_power=9;
+    int64_t bx_base=195112;//58^3
+    bx_base=bx_base*bx_base*bx_base;//58^9
+    
+    int bx_size=(b58_size-1)/bx_power+1;
+    // Allocate enough space in big-endian base58 representation.
+    std::vector<unsigned char> b58(b58_size); 
+    std::vector<int64_t> bx(bx_size); 
+    // Process the bytes.
+    while (pbegin != pend) {
+        int64_t carry = *pbegin;
+        // Apply "b58 = b58 * 256 + ch".
+        for (std::vector<int64_t>::reverse_iterator it = bx.rbegin(); it != bx.rend(); it++) {
+            carry += 256 * (*it);
+            *it = carry % bx_base;
+            carry /= bx_base;
+        }
+        assert(carry == 0);
+        pbegin++;
+    }
+    
+    int i,j,k;
+    k=b58_size;
+    i=bx_size;
+    j=0;
+    int64_t value=0;
+    while(k > 0)
+    {
+        k--;
+        if(j == 0)
+        {
+            i--;
+            j=bx_power;
+            value=bx[i];            
+        }
+        b58[k]=(unsigned char)(value%58);
+        value/=58;
+        j--;
+    }
+    
+    // Skip leading zeroes in base58 result.
+    std::vector<unsigned char>::iterator it = b58.begin();
+    while (it != b58.end() && *it == 0)
+        it++;
+    // Translate the result into a string.
+    std::string str;
+    str.reserve(zeroes + (b58.end() - it));
+    str.assign(zeroes, '1');
+    while (it != b58.end())
+        str += pszBase58[*(it++)];
+    return str;
+}
+
+
+std::string EncodeBase58_11(const unsigned char* pbegin, const unsigned char* pend)
 {
     // Skip & count leading zeroes.
     int zeroes = 0;
@@ -212,7 +352,8 @@ bool CBase58Data::SetString(const char* psz, unsigned int nVersionBytes)
     
     
 /* MCHN END */    
-    OPENSSL_cleanse(&vchTemp[0], vchData.size());
+//    OPENSSL_cleanse(&vchTemp[0], vchData.size());
+    OPENSSL_cleanse(&vchTemp[0], vchTemp.size());
     return true;
 }
 
@@ -261,85 +402,90 @@ std::string BurnAddress(const std::vector<unsigned char>& vchVersion)
     char res[100];    
     
     int shift=nDataBytes / nVersionBytes;
-    vch.resize(nDataBytes + nVersionBytes + nHashBytes);
-    int p;
-    for(int i=2;i<nDataBytes + nVersionBytes + nHashBytes;i++)
-    {
-        vch[i]=0x00;
-    }
-    vch[0]=vchVersion[0];
-    vch[1]=0x80;
-
-    
-    strcpy(res,EncodeBase58(vch).c_str());
-    memset(res+1,'X',strlen(res)-1);
-    DecodeBase58(res,vch);
-    while((int)vch.size() > nDataBytes + nVersionBytes + nHashBytes)
-    {
-        res[strlen(res)-1]=0x00;
-        DecodeBase58(res,vch);
-    }
-
-    p=0;
-    while(p<nDataBytes + nVersionBytes)
-    {
-        if( (p % (shift+1)) == 0)
-        {
-            if(vch[p] != vchVersion[p / (shift+1)])
-            {
-//                printf("%d B %s\n",p,res);
-//                mc_DumpSize("B",&vch[0],vch.size(),vch.size());
-                memset(&vch[p+2],0x00,vch.size()-p-2);
-                vch[p] = vchVersion[p / (shift+1)];
-                vch[p+1] = 0x80;
-                strcpy(test,EncodeBase58(vch).c_str());
-//                printf("%d C %s %d\n",p,test,vch[p]);
-//                mc_DumpSize("C",&vch[0],vch.size(),vch.size());
-                if(strlen(test) != strlen(res))
-                {
-                    if(strlen(test) > strlen(res))
-                    {
-                        res[strlen(res)+1]=0x00;
-                        res[strlen(res)]='X';
-                    }                        
-                    if(strlen(test) < strlen(res))
-                    {
-                        res[strlen(res)-1]=0x00;
-                    }                        
-                }
-                int j=0;
-                while( (j<(int)strlen(res)) && (res[j] == test[j]) )
-                {
-                    j++;
-                }
-                int k=0;
-                while( (k<3) && (j<(int)strlen(res)) && ((vch[p] != vchVersion[p / (shift+1)])  || (k ==0)))
-                {
-                    res[j]=test[j];
-                    DecodeBase58(res,vch);
-                    k++;
-                    j++;
-                }                
-            }
-        }
-        p++;
-    }
-    
-//    strcpy(test,EncodeBase58(vch).c_str());
-  
-    
-    for(int i=0;i<(int)nVersionBytes;i++)
-    {
-        int size=shift;
-        if(i == (int)(nVersionBytes-1))
-        {
-            size=nDataBytes-i*shift;
-        }
-        memcpy(data+i*shift,&vch[i*(shift+1)+1],size);
-    }
-    
     CKeyID kBurn;
-    memcpy(&kBurn,data,nDataBytes);
+    int p;
+    
+    if(*(uint160*)(mc_gState->m_BurnAddress) == 0)
+    {
+        vch.resize(nDataBytes + nVersionBytes + nHashBytes);
+        for(int i=2;i<nDataBytes + nVersionBytes + nHashBytes;i++)
+        {
+            vch[i]=0x00;
+        }
+        vch[0]=vchVersion[0];
+        vch[1]=0x80;
+
+
+        strcpy(res,EncodeBase58(vch).c_str());
+        memset(res+1,'X',strlen(res)-1);
+        DecodeBase58(res,vch);
+        while((int)vch.size() > nDataBytes + nVersionBytes + nHashBytes)
+        {
+            res[strlen(res)-1]=0x00;
+            DecodeBase58(res,vch);
+        }
+
+        p=0;
+        while(p<nDataBytes + nVersionBytes)
+        {
+            if( (p % (shift+1)) == 0)
+            {
+                if(vch[p] != vchVersion[p / (shift+1)])
+                {
+                    memset(&vch[p+2],0x00,vch.size()-p-2);
+                    vch[p] = vchVersion[p / (shift+1)];
+                    vch[p+1] = 0x80;
+                    strcpy(test,EncodeBase58(vch).c_str());
+                    if(strlen(test) != strlen(res))
+                    {
+                        if(strlen(test) > strlen(res))
+                        {
+                            res[strlen(res)+1]=0x00;
+                            res[strlen(res)]='X';
+                        }                        
+                        if(strlen(test) < strlen(res))
+                        {
+                            res[strlen(res)-1]=0x00;
+                        }                        
+                    }
+                    int j=0;
+                    while( (j<(int)strlen(res)) && (res[j] == test[j]) )
+                    {
+                        j++;
+                    }
+                    int k=0;
+                    while( (k<3) && (j<(int)strlen(res)) && ((vch[p] != vchVersion[p / (shift+1)])  || (k ==0)))
+                    {
+                        res[j]=test[j];
+                        DecodeBase58(res,vch);
+                        k++;
+                        j++;
+                    }                
+                }
+            }
+            p++;
+        }
+
+    //    strcpy(test,EncodeBase58(vch).c_str());
+
+
+        for(int i=0;i<(int)nVersionBytes;i++)
+        {
+            int size=shift;
+            if(i == (int)(nVersionBytes-1))
+            {
+                size=nDataBytes-i*shift;
+            }
+            memcpy(data+i*shift,&vch[i*(shift+1)+1],size);
+        }
+
+        memcpy(&kBurn,data,nDataBytes);
+        memcpy(mc_gState->m_BurnAddress,data,nDataBytes);
+    }
+    else
+    {
+        memcpy(&kBurn,mc_gState->m_BurnAddress,nDataBytes);        
+    }
   
     CBitcoinAddress ba;
     ba.Set(kBurn,vchVersion);

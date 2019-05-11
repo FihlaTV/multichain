@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef BITCOIN_CHAINPARAMS_H
@@ -59,10 +59,18 @@ public:
     bool RequireRPCPassword() const { return fRequireRPCPassword; }
     /** Make miner wait to have peers to avoid wasting work */
     bool MiningRequiresPeers() const { return fMiningRequiresPeers; }
+    /** Maximal depth of blockchain reorganization since last change in governance model, in miner diveristy rounds */
+    int LockAdminMineRounds() const { return nLockAdminMineRounds; }
+    /** Make miner mine empty blocks */
+    double MineEmptyRounds() const { return dMineEmptyRounds; }
+    /** Mining turnover */
+    double MiningTurnover() const { return dMiningTurnover; }
     /** Default value for -checkmempool argument */
     bool DefaultCheckMemPool() const { return fDefaultCheckMemPool; }
     /** Allow mining of a min-difficulty block */
     bool AllowMinDifficultyBlocks() const { return fAllowMinDifficultyBlocks; }
+    /** Disallow block nonce not covered by miner signature */
+    bool DisallowUnsignedBlockNonce() const { return fDisallowUnsignedBlockNonce; }
     /** Skip proof-of-work check: allow mining of any difficulty block */
     bool SkipProofOfWorkCheck() const { return fSkipProofOfWorkCheck; }
     /** Make standard checks */
@@ -103,13 +111,17 @@ protected:
     CBlock genesis;
     std::vector<CAddress> vFixedSeeds;
     bool fRequireRPCPassword;
+    int nLockAdminMineRounds;
     bool fMiningRequiresPeers;
+    double dMineEmptyRounds;
+    double dMiningTurnover;
     bool fDefaultCheckMemPool;
     bool fAllowMinDifficultyBlocks;
     bool fRequireStandard;
     bool fMineBlocksOnDemand;
     bool fSkipProofOfWorkCheck;
     bool fTestnetToBeDeprecatedFieldRPC;
+    bool fDisallowUnsignedBlockNonce;
 };
 
 /** 
@@ -156,6 +168,10 @@ bool SelectParamsFromCommandLine();
 
 bool SelectMultiChainParams(const char *NetworkName);
 bool InitializeMultiChainParams();
+void SetMultiChainParams();
+void SetMultiChainParam(const char*param_name,int64_t value);
+void SetMultiChainRuntimeParams();
+
 
 /* MCHN END */
 

@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "structs/uint256.h"
@@ -215,6 +215,14 @@ unsigned int base_uint<BITS>::bits() const
     }
     return 0;
 }
+
+// Explicit instantiations for base_uint<96>
+template int base_uint<96>::CompareTo(const base_uint<96>&) const;
+template bool base_uint<96>::EqualTo(uint64_t) const;
+template std::string base_uint<96>::GetHex() const;
+template std::string base_uint<96>::ToString() const;
+
+
 
 // Explicit instantiations for base_uint<160>
 template base_uint<160>::base_uint(const std::string&);

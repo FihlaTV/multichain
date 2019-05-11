@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef MULTICHAIN_WALLETTXDB_H
@@ -17,7 +17,7 @@
 
 #define MC_TDB_MAX_IMPORTS           16
 
-#define MC_TDB_WALLET_VERSION         2
+#define MC_TDB_WALLET_VERSION         3
 
 
 #define MC_TET_NONE                             0x00000000
@@ -29,18 +29,24 @@
 #define MC_TET_STREAM_KEY                       0x00000006
 #define MC_TET_STREAM_PUBLISHER                 0x00000007
 #define MC_TET_ASSET                            0x00000008
+#define MC_TET_AUTHOR                           0x00000009
 #define MC_TET_SUBKEY_STREAM_KEY                0x00000046
 #define MC_TET_SUBKEY_STREAM_PUBLISHER          0x00000047
 #define MC_TET_SUBKEY                           0x00000040
-#define MC_TET_TYPE_MASK                        0x000000FF
+#define MC_TET_TYPE_MASK                        0x040000FF
 #define MC_TET_CHAINPOS                         0x00000100
 #define MC_TET_TIMERECEIVED                     0x00000200
 #define MC_TET_ORDERMASK                        0x0000FF00
+#define MC_TET_RESERVEDMASK                     0x00FF0000
 #define MC_TET_DB_STAT                          0x01000000
 #define MC_TET_IMPORT                           0x02000000
+#define MC_TET_DELETED                          0x04000000
+#define MC_TET_GETDB_ADD_TX                     0x10000000   
 #define MC_TET_SPECIALMASK                      0xFF000000
 
+#define MC_EFL_RESERVEDMASK                     0x00FF0000
 #define MC_EFL_NOT_IN_SYNC                      0x01000000
+#define MC_EFL_NOT_IN_SYNC_AFTER_IMPORT         0x02000000
 #define MC_EFL_UNSUBSCRIBED                     0x10000000
 
 #define MC_SFL_NONE             0x00000000
@@ -48,6 +54,16 @@
 #define MC_SFL_IS_ADDRESS       0x00000002
 #define MC_SFL_NODATA           0x01000000
 #define MC_SFL_SUBKEY           0x02000000
+
+#define MC_TEE_OFFSET_IN_TXID                  24
+#define MC_TEE_SIZE_IN_EXTENSION                8
+
+#define MC_TFL_IS_EXTENSION             0x01000000
+
+#define MC_TCF_NOT_CACHED                    0x00000000
+#define MC_TCF_ERROR                         0x00000001
+#define MC_TCF_FOUND                         0x00000002
+#define MC_TCF_NOT_FOUND                     0x00000004
 
 
 /** Entity - wallet, address, stream, etc. **/
@@ -58,7 +74,18 @@ typedef struct mc_TxEntity
     uint32_t m_EntityType;                                                      // Entity type, MC_TET_ constants
     void Zero();
     void Init(unsigned char *entity_id,uint32_t entity_type);
+    int IsSubscription();
 } mc_TxEntity;
+
+typedef struct mc_TxEntityRowExtension
+{
+    uint32_t m_Output;
+    uint32_t m_Count;
+    uint32_t m_TmpLastCount;
+    uint32_t m_Reserved;
+    void Zero();
+} mc_TxEntityRowExtension;
+
 
 /** Entity row pos->txid **/
 
@@ -223,10 +250,13 @@ typedef struct mc_TxDB
     char m_LobFileNamePrefix[MC_DCT_DB_MAX_PATH];                               // Full data file name
     char m_LogFileName[MC_DCT_DB_MAX_PATH];                                     // Full log file name    
     
+    int m_UnsubscribeMemPoolSize;                                               // Size of the mempool when unsubscribed
     uint32_t m_Mode;
     void *m_Semaphore;                                                          // mc_TxDB object semaphore
     uint64_t m_LockedBy;                                                        // ID of the thread locking it
-
+    mc_TxDefRow m_TxCachedDef;                                                              
+    uint32_t m_TxCachedFlags;                                                              
+    
     mc_TxDB()
     {
         Zero();
@@ -240,7 +270,9 @@ typedef struct mc_TxDB
     int Initialize(                                                             // Initalization
               const char *name,                                                 // Chain name
               uint32_t mode);                                                   // Unused
-
+    
+    int UpdateMode(uint32_t mode);
+    
     int AddEntity(mc_TxEntity *entity,uint32_t flags);                          // Adds entity to chain import
     int AddEntity(mc_TxImport *import,mc_TxEntity *entity,uint32_t flags);      // Adds entity to import
        
@@ -266,9 +298,10 @@ typedef struct mc_TxDB
               mc_TxEntity *entity,                                              // Subkey entity
               const unsigned char *subkey_hash,                                 // Subkey hash
               const unsigned char *tx_hash,                                     // Tx hash (before chopping)    
+              mc_TxEntityRowExtension *extension,                               // Tx extension for storing multiple items per tx
               int block,                                                        // Block we are processing now, -1 for mempool
               uint32_t flags,                                                   // Flags passed by the higher level                
-              int newtx                                                         // New tx flag
+              int newtx                                                         // New tx flag    
     );
     
     int DecrementSubKey(
@@ -291,9 +324,17 @@ typedef struct mc_TxDB
               uint32_t timestamp,                                               // timestamp to be stored as timereceived
               mc_Buffer *entities);                                             // List of relevant entities for this tx
     
+    int SetTxCache(                                                             // Returns tx definition if found, error if not found
+              const unsigned char *hash);                                       // Input. Tx hash
+    
     int GetTx(                                                                  // Returns tx definition if found, error if not found
               mc_TxDefRow *txdef,                                               // Output. Tx def
               const unsigned char *hash);                                       // Input. Tx hash
+    
+    int GetTx(                                                                  // Returns tx definition if found, error if not found
+              mc_TxDefRow *txdef,                                               // Output. Tx def
+              const unsigned char *hash,                                        // Input. Tx hash
+              int skip_db);                                       
     
     int GetList(
                 mc_TxImport *import,                                            // Import object, if NULL - chain
@@ -333,12 +374,19 @@ typedef struct mc_TxDB
                     int generation,                                             // Entity generation
                     int *confirmed);                                            // Out: number of confirmed items    
     
+    int GetBlockItemIndex(                                                      // Returns item id for the last item confirmed in this block or before
+                    mc_TxImport *import,                                        // Import object, if NULL - chain
+                    mc_TxEntity *entity,                                        // Entity to return info for
+                    int block);                                                 // Block to find item for
+    
     int BeforeCommit(mc_TxImport *import);                                      // Should be called before re-adding tx while processing block
     int Commit(mc_TxImport *import);                                            // Commit when block was processed
     int RollBack(mc_TxImport *import,int block);                                // Rollback to specific block
 
     int Unsubscribe(mc_Buffer *lpEntities);                                     // List of the entities to unsubscribe from
-    
+
+    int TransferSubKey(mc_TxEntityStat *lpChainEntStat,const mc_TxEntityRow& erow,int slot);
+
     mc_TxImport *StartImport(                                                   // Starts new import
                              mc_Buffer *lpEntities,                             // List of entities to import
                              int block,                                         // Star from this block            
@@ -350,7 +398,7 @@ typedef struct mc_TxDB
     int ImportGetBlock(                                                         // Returns last processed block in the import
                        mc_TxImport *import);
     
-    int CompleteImport(mc_TxImport *import);                                    // Completes import - merges with chain
+    int CompleteImport(mc_TxImport *import,uint32_t flags);                     // Completes import - merges with chain
     
     int DropImport(mc_TxImport *import);                                        // Drops uncompleted import
 
@@ -363,6 +411,7 @@ typedef struct mc_TxDB
     void Zero();    
     int Destroy();
     void Dump(const char *message);
+    void Dump(const char *message, int force);
     
     int Lock(int write_mode, int allow_secondary);
     void UnLock();
@@ -371,6 +420,8 @@ typedef struct mc_TxDB
                   uint32_t txsize,
                   uint32_t fileid,
                   uint32_t offset);
+    
+    int FlushDataFile(uint32_t fileid);
     
     void LogString(const char *message);
     

@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef BITCOIN_WALLET_H
@@ -45,12 +45,6 @@ extern bool fPayAtLeastCustomFee;
 
 //! -paytxfee default
 static const CAmount DEFAULT_TRANSACTION_FEE = 0;
-//! -paytxfee will warn if called with a higher fee than this amount (in satoshis) per KB
-static const CAmount nHighTransactionFeeWarning = 0.01 * COIN;
-//! -maxtxfee default
-static const CAmount DEFAULT_TRANSACTION_MAXFEE = 0.1 * COIN;
-//! -maxtxfee will warn if called with a higher fee than this amount (in satoshis)
-static const CAmount nHighTransactionMaxFeeWarning = 100 * nHighTransactionFeeWarning;
 //! Largest (in bytes) free transaction we're willing to create
 static const unsigned int MAX_FREE_TRANSACTION_CREATE_SIZE = 1000;
 
@@ -69,12 +63,15 @@ struct mc_WalletTxs;
 #define MC_TFL_ALL_INPUTS_FROM_ME       0x00020000
 #define MC_TFL_IS_CHANGE                0x00040000
 #define MC_TFL_IS_SPENDABLE             0x00080000
+//#define MC_TFL_IS_EXTENSION             0x01000000                            // defined in walletdb.h
+#define MC_TFL_IS_MINE_FOR_THIS_SEND    0x10000000
 #define MC_TFL_IMPOSSIBLE               0x80000000
 
 #define MC_CSF_ALLOW_SPENDABLE_P2SH     0x00000001
 #define MC_CSF_ALLOW_NOT_SPENDABLE_P2SH 0x00000002
 #define MC_CSF_ALLOW_NOT_SPENDABLE      0x00000004
 #define MC_CSF_SIGN                     0x00000008
+#define MC_CSF_ALLOWED_COINS_ARE_MINE   0x00000010
 
 
 class mc_Coin
@@ -109,6 +106,7 @@ public:
     bool IsFinal() const;
     int BlocksToMaturity() const;
     bool IsTrusted() const;
+    bool IsTrustedNoDepth() const;
     int GetDepthInMainChain() const;
     
     std::string ToString() const;    
@@ -175,6 +173,7 @@ private:
     int nMaxAssetsPerGroup;
     int nOptimalGroupCount;
     int nMode;
+    int nSingleAssetGroupCount;
     void Clear();
     void Destroy();
     
@@ -183,6 +182,7 @@ private:
     int *lpTmpGroupBuffer;
     
     CAssetGroup *FindAndShiftBestGroup(int assets);
+    CAssetGroup *AddSingleAssetGroup(unsigned char *assetRef);
     
 public:
     
@@ -355,6 +355,7 @@ public:
     CAssetGroupTree *lpAssetGroups;
     mc_WalletTxs *lpWalletTxs;
     void DestroyWalletTxs();
+    std::string SetDefaultKeyIfInvalid(std::string init_privkey);
     
 //    std::map<COutPoint, CExchangeStatus> mapExchanges;
     
@@ -379,7 +380,7 @@ public:
 /* MCHN START */    
 //    void AvailableCoins(std::vector<COutput>& vCoins, bool fOnlyConfirmed=true, const CCoinControl *coinControl = NULL) const;
     void AvailableCoins(std::vector<COutput>& vCoins, bool fOnlyConfirmed=true, const CCoinControl *coinControl = NULL, bool fOnlyUnlocked=true, 
-                        bool fOnlyCoinsNoTxs=false, uint160 addr=0, uint32_t flags=MC_CSF_ALLOW_SPENDABLE_P2SH) const;
+                        bool fOnlyCoinsNoTxs=false, uint160 addr=0, const std::set<uint160>* addresses=NULL, uint32_t flags=MC_CSF_ALLOW_SPENDABLE_P2SH) const;
 /* MCHN END */    
     bool SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int nConfTheirs, std::vector<COutput> vCoins, std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet) const;
 
@@ -454,7 +455,7 @@ public:
     void SyncTransaction(const CTransaction& tx, const CBlock* pblock);
     bool AddToWalletIfInvolvingMe(const CTransaction& tx, const CBlock* pblock, bool fUpdate);
     void EraseFromWallet(const uint256 &hash);
-    int ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate = false, bool fOnlyUnsynced = false);
+    int ScanForWalletTransactions(CBlockIndex* pindexStart, bool fUpdate = false, bool fOnlyUnsynced = false,bool fOnlySubscriptions = false);
     void ReacceptWalletTransactions();
     void ResendWalletTransactions(bool fForce = false);
     CAmount GetBalance() const;
@@ -479,13 +480,13 @@ public:
                                 std::set<std::pair<uint256,unsigned int> >& setCoinsRet, CAmount& nValueRet, const CCoinControl* coinControl) const;    
     bool CreateMultiChainTransaction(const std::vector<std::pair<CScript, CAmount> >& vecSend,
                            CWalletTx& wtxNew, CReserveKey& reservekey, CAmount& nFeeRet, std::string& strFailReason, const CCoinControl *coinControl = NULL,
-                           const std::set<CTxDestination>* addresses = NULL,int min_conf = 1,int min_inputs = -1,int max_inputs = -1, const std::vector<COutPoint> *lpCoinsToUse = NULL);
+                           const std::set<CTxDestination>* addresses = NULL,int min_conf = 1,int min_inputs = -1,int max_inputs = -1, const std::vector<COutPoint> *lpCoinsToUse = NULL, int *eErrorCode = NULL);
     bool CreateTransaction(CScript scriptPubKey, const CAmount& nValue, CScript scriptOpReturn,
                            CWalletTx& wtxNew, CReserveKey& reservekey, CAmount& nFeeRet, std::string& strFailReason, const CCoinControl *coinControl = NULL,
-                           const std::set<CTxDestination>* addresses = NULL,int min_conf = 1,int min_inputs = -1,int max_inputs = -1, const std::vector<COutPoint> *lpCoinsToUse = NULL);
+                           const std::set<CTxDestination>* addresses = NULL,int min_conf = 1,int min_inputs = -1,int max_inputs = -1, const std::vector<COutPoint> *lpCoinsToUse = NULL, int *eErrorCode = NULL);
     bool CreateTransaction(std::vector<CScript> scriptPubKeys, const CAmount& nValue, CScript scriptOpReturn,
                            CWalletTx& wtxNew, CReserveKey& reservekey, CAmount& nFeeRet, std::string& strFailReason, const CCoinControl* coinControl = NULL,
-                           const std::set<CTxDestination>* addresses = NULL,int min_conf = 1,int min_inputs = -1,int max_inputs = -1, const std::vector<COutPoint> *lpCoinsToUse = NULL);
+                           const std::set<CTxDestination>* addresses = NULL,int min_conf = 1,int min_inputs = -1,int max_inputs = -1, const std::vector<COutPoint> *lpCoinsToUse = NULL, int *eErrorCode = NULL);
     bool CreateAndCommitOptimizeTransaction(CWalletTx& wtxNew,std::string& strFailReason,
                            const std::set<CTxDestination>* addresses = NULL,int min_conf = 1,int min_inputs = -1,int max_inputs = -1);
     bool OptimizeUnspentList(); 
@@ -773,7 +774,6 @@ public:
     bool IsInMainChain() const { const CBlockIndex *pindexRet; return GetDepthInMainChainINTERNAL(pindexRet) > 0; }
     int GetBlocksToMaturity() const;
     bool AcceptToMemoryPool(bool fLimitFree=true, bool fRejectInsaneFee=true);
-    bool AcceptToMemoryPoolReturnReason(bool fLimitFree, bool fRejectInsaneFee,std::string& reject_reason);
     
 };
 
@@ -838,6 +838,8 @@ public:
     {
         Init(pwalletIn);
     }
+    
+    bool AcceptToMemoryPoolReturnReason(bool fLimitFree, bool fRejectInsaneFee,std::string& reject_reason);
 
     void Init(const CWallet* pwalletIn)
     {
@@ -1195,6 +1197,7 @@ public:
     
     uint256 GetHashAndTxOut(CTxOut& txout) const;
     bool IsTrusted() const;
+    bool IsTrustedNoDepth() const;
 };
 
 

@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "utils/util.h"
@@ -12,8 +12,11 @@
 #include "wallet/keystore.h"
 #include "script/standard.h"
 #include "structs/uint256.h"
+#include "sigcache.h"
 
 #include <boost/foreach.hpp>
+
+void MultichainNode_AddSignatureToCache(const std::vector<unsigned char>& vchSig, const CPubKey& pubkey, const uint256& sighash);
 
 using namespace std;
 
@@ -37,9 +40,14 @@ bool Sign1(const CKeyID& address, const CKeyStore& keystore, uint256 hash, int n
     vector<unsigned char> vchSig;
     if (!key.Sign(hash, vchSig))
         return false;
+    if(GetBoolArg("-cachejustsigned",true))
+    {
+        MultichainNode_AddSignatureToCache(vchSig,key.GetPubKey(),hash);
+    }
     vchSig.push_back((unsigned char)nHashType);
     scriptSigRet << vchSig;
-
+    
+    
     return true;
 }
 
@@ -85,7 +93,7 @@ bool Solver(const CKeyStore& keystore, const CScript& scriptPubKey, uint256 hash
     scriptSigRet.clear();
 
     vector<valtype> vSolutions;
-    if (!Solver(scriptPubKey, whichTypeRet, vSolutions))
+    if (!TemplateSolver(scriptPubKey, whichTypeRet, vSolutions))
         return false;
 
     CKeyID keyID;
@@ -149,7 +157,7 @@ bool SignSignature(const CKeyStore &keystore, const CScript& fromPubKey, CMutabl
     }
 
     // Test solution
-    if(GetBoolArg("-verifyjustsigned",true))
+    if(GetBoolArg("-verifyjustsigned",false))
     {
         return VerifyScript(txin.scriptSig, fromPubKey, STANDARD_SCRIPT_VERIFY_FLAGS, MutableTransactionSignatureChecker(&txTo, nIn));
     }
@@ -266,7 +274,7 @@ static CScript CombineSignatures(const CScript& scriptPubKey, const CTransaction
 
             txnouttype txType2;
             vector<vector<unsigned char> > vSolutions2;
-            Solver(pubKey2, txType2, vSolutions2);
+            TemplateSolver(pubKey2, txType2, vSolutions2);
             sigs1.pop_back();
             sigs2.pop_back();
             CScript result = CombineSignatures(pubKey2, txTo, nIn, txType2, vSolutions2, sigs1, sigs2);
@@ -285,7 +293,7 @@ CScript CombineSignatures(const CScript& scriptPubKey, const CTransaction& txTo,
 {
     txnouttype txType;
     vector<vector<unsigned char> > vSolutions;
-    Solver(scriptPubKey, txType, vSolutions);
+    TemplateSolver(scriptPubKey, txType, vSolutions);
 
     vector<valtype> stack1;
     EvalScript(stack1, scriptSig1, SCRIPT_VERIFY_STRICTENC, BaseSignatureChecker());

@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2016 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "core/init.h"
@@ -84,12 +84,12 @@ bool MultichainNode_DisconnectLocal(CNode *pnode)
 
 bool MultichainNode_RespondToGetData(CNode *pnode)
 {
-    return !(pnode->fDisconnect) & mc_gState->m_Permissions->CanConnect(NULL,pnode->kAddrRemote.begin());    
+    return !(pnode->fDisconnect) && (mc_gState->m_Permissions->CanConnect(NULL,pnode->kAddrRemote.begin()) != 0);    
 }
 
 bool MultichainNode_SendInv(CNode *pnode)
 {
-    return !(pnode->fDisconnect) & mc_gState->m_Permissions->CanConnect(NULL,pnode->kAddrRemote.begin());    
+    return !(pnode->fDisconnect) && (mc_gState->m_Permissions->CanConnect(NULL,pnode->kAddrRemote.begin()) != 0);    
 }
 
 bool MultichainNode_AcceptData(CNode *pnode)
@@ -110,6 +110,20 @@ bool MultichainNode_IgnoreIncoming(CNode *pnode)
     }
     return false;
 }
+
+bool MultichainNode_CollectChunks()
+{
+    if(mc_gState->m_NodePausedState & MC_NPS_OFFCHAIN)
+    {
+        return false;
+    }
+    if(mc_gState->m_NodePausedState & MC_NPS_CHUNKS)
+    {
+        return false;
+    }
+    return true;
+}
+
 
 bool MultichainNode_IsLocal(CNode *pnode)
 {
@@ -190,7 +204,7 @@ bool ProcessMultichainVerack(CNode* pfrom, CDataStream& vRecv,bool fIsVerackack,
         }
     }
     
-    if(mc_gState->m_NetworkParams->GetInt64Param("anyonecanconnect") == 0)
+    if(MCP_ANYONE_CAN_CONNECT == 0)
     {
         CScript scriptSig((unsigned char*)sSigScript.c_str(),(unsigned char*)sSigScript.c_str()+sSigScript.size());
         
@@ -338,15 +352,22 @@ bool ProcessMultichainVerack(CNode* pfrom, CDataStream& vRecv,bool fIsVerackack,
                 }
             }
 
-            if(mc_gState->m_NetworkParams->Write(1))
+            if( (pwalletMain != NULL) && !pwalletMain->vchDefaultKey.IsValid() && (mc_gState->m_NetworkParams->GetParam("privatekeyversion",NULL) == NULL) )
             {
-                LogPrintf("mchn: Cannot store parameter set received from %s\n", pfrom->addr.ToString());
-                mc_gState->m_NetworkParams->m_Status=MC_PRM_STATUS_ERROR;
-                return false;                       
+                LogPrintf("mchn: Parameter set received from %s doesn't contain privatekeyversion fields, not stored\n", pfrom->addr.ToString());                
             }
             else
             {
-                LogPrintf("mchn: Successfully stored parameter set received from %s\n", pfrom->addr.ToString());
+                if(mc_gState->m_NetworkParams->Write(1))
+                {
+                    LogPrintf("mchn: Cannot store parameter set received from %s\n", pfrom->addr.ToString());
+                    mc_gState->m_NetworkParams->m_Status=MC_PRM_STATUS_ERROR;
+                    return false;                       
+                }
+                else
+                {
+                    LogPrintf("mchn: Successfully stored parameter set received from %s\n", pfrom->addr.ToString());
+                }
             }
         }
         else
@@ -377,7 +398,7 @@ bool PushMultiChainVerack(CNode* pfrom, bool fIsVerackack)
     
     if(!fIsVerackack)
     {
-        if((pfrom->fDefaultMessageStart && (mc_gState->m_NetworkParams->GetInt64Param("anyonecanconnect")!=0) ) || 
+        if((pfrom->fDefaultMessageStart && (MCP_ANYONE_CAN_CONNECT!=0) ) || 
             pfrom->fVerackackReceived)
         {
             vParameterSet=vector<unsigned char>(mc_gState->m_NetworkParams->m_lpData,mc_gState->m_NetworkParams->m_lpData+mc_gState->m_NetworkParams->m_Size);        
@@ -385,13 +406,13 @@ bool PushMultiChainVerack(CNode* pfrom, bool fIsVerackack)
         }
         else
         {
-            string fields_to_send [] ={"protocolversion","chainname","defaultrpcport","networkmessagestart","addresspubkeyhashversion","addresschecksumvalue"};
+            string fields_to_send [] ={"protocolversion","chainname","defaultrpcport","networkmessagestart","addresspubkeyhashversion","addresschecksumvalue","privatekeyversion"};
             int NumFieldsToSend=1;
             unsigned char *ptr;
             int size;
 //            if(pfrom->fDefaultMessageStart)
             {
-                NumFieldsToSend=6;                
+                NumFieldsToSend=7;                
             }
             LogPrintf("mchn: Sending minimal parameter set to %s\n", pfrom->addr.ToString());
             for(int f=0;f<NumFieldsToSend;f++)

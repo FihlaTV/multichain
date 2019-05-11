@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "script.h"
@@ -215,13 +215,20 @@ unsigned int CScript::GetSigOpCount(const CScript& scriptSig) const
 bool CScript::IsPayToScriptHash() const
 {
     // Extra-fast test for pay-to-script-hash CScripts:
-/* MCHN START*/    
 //    return (this->size() == 23 &&
-    return (this->size() >= 23 &&
-/* MCHN END*/    
-            this->at(0) == OP_HASH160 &&
-            this->at(1) == 0x14 &&
-            this->at(22) == OP_EQUAL);
+    if(mc_gState->m_NetworkParams->IsProtocolMultichain())
+    {
+        return (this->size() >= 23 &&
+                this->at(0) == OP_HASH160 &&
+                this->at(1) == 0x14 &&
+                this->at(22) == OP_EQUAL);
+    }
+    
+        return (this->size() == 23 &&
+                this->at(0) == OP_HASH160 &&
+                this->at(1) == 0x14 &&
+                this->at(22) == OP_EQUAL);
+    
 }
 
 bool CScript::IsPushOnly() const

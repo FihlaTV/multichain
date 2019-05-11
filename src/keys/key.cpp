@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2016 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "keys/key.h"
@@ -124,9 +124,10 @@ bool CKey::Check(const unsigned char *vch) {
 }
 
 void CKey::MakeNewKey(bool fCompressedIn) {
-    RandAddSeedPerfmon();
+//    RandAddSeedPerfmon();
     do {
-        GetRandBytes(vch, sizeof(vch));
+//        GetRandBytes(vch, sizeof(vch));
+        GetStrongRandBytes(vch, sizeof(vch));
     } while (!Check(vch));
     fValid = true;
     fCompressed = fCompressedIn;

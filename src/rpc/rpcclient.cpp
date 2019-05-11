@@ -1,7 +1,7 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "rpc/rpcclient.h"
@@ -23,6 +23,207 @@ public:
     int paramIdx;                      //! 0-based idx of param to convert
 };
 
+static const std::string vAPINames[] =
+{
+"addmultisigaddress",
+"addnode",
+"addresses-all",
+"appendbinarycache",
+"appendrawchange",
+"appendrawdata",
+"appendrawexchange",
+"appendrawmetadata",
+"appendrawtransaction",
+"approvefrom",
+"backupwallet",
+"clearmempool",
+"combineunspent",
+"completerawexchange",
+"create",
+"createbinarycache",
+"createfrom",
+"createkeypairs",
+"createmultisig",
+"createrawexchange",
+"createrawsendfrom",
+"createrawtransaction",
+"data-all",
+"data-with",
+"debug",
+"decoderawexchange",
+"decoderawtransaction",
+"decodescript",
+"deletebinarycache",
+"disablerawtransaction",
+"dumpprivkey",
+"dumpwallet",
+"encryptwallet",
+"estimatefee",
+"estimatepriority",
+"filters",
+"getaccount",
+"getaccountaddress",
+"getaddednodeinfo",
+"getaddressbalances",
+"getaddresses",
+"getaddressesbyaccount",
+"getaddresstransaction",
+"getassetbalances",
+"getassetinfo",
+"getassettransaction",
+"getbalance",
+"getbestblockhash",
+"getblock",
+"getblockchaininfo",
+"getblockchainparams",
+"getblockcount",
+"getblockhash",
+"getblocktemplate",
+"getchaintips",
+"getchunkqueueinfo",
+"getchunkqueuetotals",
+"getconnectioncount",
+"getdifficulty",
+"getfilterassetbalances",
+"getfiltercode",
+"getfilterstreamitem",
+"getfiltertransaction",
+"getfiltertxid",
+"getfiltertxinput",
+"getgenerate",
+"gethashespersec",
+"getinfo",
+"getlastblockinfo",
+"getmempoolinfo",
+"getmininginfo",
+"getmultibalances",
+"getnettotals",
+"getnetworkhashps",
+"getnetworkinfo",
+"getnewaddress",
+"getpeerinfo",
+"getrawchangeaddress",
+"getrawmempool",
+"getrawtransaction",
+"getreceivedbyaccount",
+"getreceivedbyaddress",
+"getruntimeparams",
+"getstreaminfo",
+"getstreamitem",
+"getstreamkeysummary",
+"getstreampublishersummary",
+"gettotalbalances",
+"gettransaction",
+"gettxout",
+"gettxoutdata",
+"gettxoutsetinfo",
+"getunconfirmedbalance",
+"getwalletinfo",
+"getwallettransaction",
+"grant",
+"grantfrom",
+"grantwithdata",
+"grantwithdatafrom",
+"grantwithmetadata",
+"grantwithmetadatafrom",
+"help",
+"importaddress",
+"importprivkey",
+"importwallet",
+"invalidateblock",
+"issue",
+"issuefrom",
+"issuemore",
+"issuemorefrom",
+"keypoolrefill",
+"listaccounts",
+"listaddresses",
+"listaddressgroupings",
+"listaddresstransactions",
+"listassets",
+"listassettransactions",
+"listblocks",
+"listlockunspent",
+"listpermissions",
+"listreceivedbyaccount",
+"listreceivedbyaddress",
+"listsinceblock",
+"liststreamblockitems",
+"liststreamfilters",
+"liststreamitems",
+"liststreamkeyitems",
+"liststreamkeys",
+"liststreampublisheritems",
+"liststreampublishers",
+"liststreamqueryitems",
+"liststreams",
+"liststreamtxitems",
+"listtransactions",
+"listtxfilters",
+"listunspent",
+"listupgrades",
+"listwallettransactions",
+"lockunspent",
+"move",
+"pause",
+"ping",
+"preparelockunspent",
+"preparelockunspentfrom",
+"prioritisetransaction",
+"publish",
+"publishfrom",
+"publishmulti",
+"publishmultifrom",
+"purgestreamitems",
+"purgepublisheditems",
+"reconsiderblock",
+"resendwallettransactions",
+"resume",
+"retrievestreamitems",
+"revoke",
+"revokefrom",
+"runstreamfilter",
+"runtxfilter",
+"send",
+"sendasset",
+"sendassetfrom",
+"sendassettoaddress",
+"sendfrom",
+"sendfromaccount",
+"sendfromaddress",
+"sendmany",
+"sendrawtransaction",
+"sendtoaddress",
+"sendwithdata",
+"sendwithdatafrom",
+"sendwithmetadata",
+"sendwithmetadatafrom",
+"setaccount",
+"setfilterparam",
+"setgenerate",
+"setlastblock",
+"setmocktime",
+"setruntimeparam",
+"settxfee",
+"signmessage",
+"signrawtransaction",
+"stop",
+"storechunk",
+"submitblock",
+"subscribe",
+"teststreamfilter",
+"testtxfilter",
+"trimsubscribe",
+"unsubscribe",
+"validateaddress",
+"verifychain",
+"verifymessage",
+"verifypermission",
+"walletlock",
+"walletpassphrase",
+"walletpassphrasechange"    
+};
+
 static const CRPCConvertParam vRPCConvertParams[] =
 {
     { "stop", 0 },
@@ -35,6 +236,9 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "sendtoaddress", 1 },
     { "send", 1 },
 /* MCHN START */    
+//    { "setruntimeparam", 1 },                                                             
+    { "debug", 1 },                                                             
+    { "debug", 2 },                                                             
     { "createkeypairs", 0 },                                                             
     { "combineunspent", 1 },                                                             
     { "combineunspent", 2 },                                                             
@@ -61,6 +265,9 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "issuemore", 2 },                                                            
     { "issuemore", 3 },                                                            
     { "issuemore", 4 },                                                            
+    { "getassetinfo", 1 },                                                            
+    { "getstreaminfo", 1 },                                                            
+    { "getfiltertxinput", 0 },                                                            
     { "listassets", 0 },
     { "listassets", 1 },                                                            
     { "listassets", 2 },                                                            
@@ -69,6 +276,24 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "liststreams", 1 },                                                            
     { "liststreams", 2 },                                                            
     { "liststreams", 3 },                                                            
+    { "listupgrades", 0 },
+    { "listupgrades", 1 },                                                            
+    { "listupgrades", 2 },                                                            
+    { "listupgrades", 3 },                                                            
+    { "listtxfilters", 0 },
+    { "listtxfilters", 1 },                                                            
+    { "liststreamfilters", 0 },
+    { "liststreamfilters", 1 },                                                            
+    { "testtxfilter", 0 },                                                            
+    { "teststreamfilter", 0 },                                                            
+    { "teststreamfilter", 3 },                                                            
+    { "runstreamfilter", 2 },                                                            
+    { "publishfrom", 2 },                                                            
+    { "publishfrom", 3 },                                                            
+    { "publish", 1 },
+    { "publish", 2 },                                                            
+    { "publishmultifrom", 2 },                                                            
+    { "publishmulti", 1 },                                                            
     { "getassetbalances", 1 },
     { "getassetbalances", 2 },
     { "getassetbalances", 3 },
@@ -79,13 +304,18 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "sendassettoaddress", 3 },
     { "sendasset", 2 },
     { "sendasset", 3 },
+    { "getlastblockinfo", 0 },
     { "getblockchainparams", 0 },
+    { "getblockchainparams", 1 },
     { "preparelockunspent", 0 },
     { "preparelockunspent", 1 },
     { "createrawexchange", 1 },
     { "createrawexchange", 2 },
     { "appendrawexchange", 2 },
     { "appendrawexchange", 3 },    
+    { "completerawexchange", 2 },
+    { "completerawexchange", 3 },    
+    { "completerawexchange", 4 },    
     { "decoderawexchange", 1 },    
     { "appendrawmetadata", 1 },
     { "appendrawdata", 1 },
@@ -104,6 +334,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "grantfrom", 3 },                                                             
     { "grantfrom", 4 },                                                             
     { "grantfrom", 5 },                                                             
+    { "approvefrom", 2 },                                                             
     { "revokefrom", 3 },                                                            
     { "issuefrom", 2 },                                                            
     { "issuefrom", 3 },                                                            
@@ -154,13 +385,20 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "create", 3 },                                                            
     { "subscribe", 0 },
     { "subscribe", 1 },
+    { "trimsubscribe", 0 },
+    { "retrievestreamitems", 1 },
+    { "purgestreamitems", 1 },
+    { "purgepublisheditems", 0 },
     { "unsubscribe", 0 },
+    { "unsubscribe", 1 },
     { "listassettransactions", 1 },
     { "listassettransactions", 2 },
     { "listassettransactions", 3 },
     { "listassettransactions", 4 },
     { "getassettransaction", 2 },
     { "getstreamitem", 2 },
+    { "liststreamtxitems", 1 },
+    { "liststreamtxitems", 2 },
     { "liststreamitems", 1 },
     { "liststreamitems", 2 },
     { "liststreamitems", 3 },
@@ -168,6 +406,9 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "gettxoutdata", 1 },
     { "gettxoutdata", 2 },
     { "gettxoutdata", 3 },
+    { "txouttobinarycache", 2 },
+    { "txouttobinarycache", 3 },
+    { "txouttobinarycache", 4 },
     { "liststreamkeys", 1 },
     { "liststreamkeys", 2 },
     { "liststreamkeys", 3 },
@@ -178,6 +419,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "liststreampublishers", 3 },
     { "liststreampublishers", 4 },
     { "liststreampublishers", 5 },
+    { "liststreamqueryitems", 1 },
+    { "liststreamqueryitems", 2 },
     { "liststreamkeyitems", 2 },
     { "liststreamkeyitems", 3 },
     { "liststreamkeyitems", 4 },
@@ -186,6 +429,12 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "liststreampublisheritems", 3 },
     { "liststreampublisheritems", 4 },
     { "liststreampublisheritems", 5 },
+    { "liststreamblockitems", 1 },
+    { "liststreamblockitems", 2 },
+    { "liststreamblockitems", 3 },
+    { "liststreamblockitems", 4 },
+    { "listblocks", 0 },
+    { "listblocks", 1 },
 /* MCHN END */    
     { "settxfee", 0 },
     { "getreceivedbyaddress", 1 },
@@ -226,6 +475,9 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "getblock", 1 },
     { "gettransaction", 1 },
     { "getrawtransaction", 1 },
+    { "appendrawtransaction", 1 },
+    { "appendrawtransaction", 2 },
+    { "appendrawtransaction", 3 },
     { "createrawtransaction", 0 },
     { "createrawtransaction", 1 },
     { "createrawtransaction", 2 },
@@ -242,6 +494,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "importprivkey", 2 },
     { "importaddress", 0 },
     { "importaddress", 2 },
+    { "importwallet", 1 },
     { "verifychain", 0 },
     { "verifychain", 1 },
     { "keypoolrefill", 0 },
@@ -265,6 +518,30 @@ public:
     }
 };
 
+class CRPCNameTable
+{
+private:
+    std::set<std::string > members;
+
+public:
+    CRPCNameTable();
+
+    bool found(const std::string& method) {
+        return (members.count(method) > 0);
+    }
+};
+
+CRPCNameTable::CRPCNameTable()
+{
+    const unsigned int n_elem =
+        (sizeof(vAPINames) / sizeof(vAPINames[0]));
+
+    for (unsigned int i = 0; i < n_elem; i++) {
+        members.insert(vAPINames[i]);
+    }
+}
+
+
 CRPCConvertTable::CRPCConvertTable()
 {
     const unsigned int n_elem =
@@ -277,6 +554,7 @@ CRPCConvertTable::CRPCConvertTable()
 }
 
 static CRPCConvertTable rpcCvtTable;
+static CRPCNameTable rpcNamTable;
 
 /* MCHN START */
 
@@ -304,15 +582,33 @@ static const CRPCConvertParamMayBeString vRPCConvertParamsMayBeString[] =
     { "sendwithdata", 2 },
     { "sendwithmetadatafrom", 3 },
     { "sendwithdatafrom", 3 },
+    { "completerawexchange", 4 },    
     { "importaddress", 0 },
     { "importprivkey", 0 },
     { "subscribe", 0 },
+    { "trimsubscribe", 0 },
+    { "retrievestreamitems", 1 },
+    { "purgestreamitems", 1 },
+    { "purgepublisheditems", 0 },
     { "unsubscribe", 0 },
     { "liststreamkeys", 1 },
     { "liststreampublishers", 1 },
+    { "liststreamtxitems", 1 },
     { "listassets", 0 },
     { "liststreams", 0 },
+    { "listupgrades", 0 },
+    { "listtxfilters", 0 },                                                            
+    { "liststreamfilters", 0 },                                                            
     { "listpermissions", 1 },
+    { "publishfrom", 2 },                                                            
+    { "publishfrom", 3 },                                                            
+    { "publish", 1 },
+    { "publish", 2 },                                                            
+    { "setgenerate", 0 },
+    { "liststreamblockitems", 1 },
+    { "listblocks", 0 },
+    { "createfrom", 4 },                                                            
+    { "create", 3 },                                                            
 };
 
 class CRPCConvertTableMayBeString
@@ -341,6 +637,12 @@ CRPCConvertTableMayBeString::CRPCConvertTableMayBeString()
 
 static CRPCConvertTableMayBeString rpcCvtTableMayBeString;
 
+
+bool HaveAPIWithThisName(const std::string &strMethod)
+{
+    return rpcNamTable.found(strMethod);
+}
+
 /* MCHN END */
 
 /** Convert strings to command-specific RPC representation */
@@ -353,7 +655,9 @@ Array RPCConvertValues(const std::string &strMethod, const std::vector<std::stri
 
         // insert string value directly
         if (!rpcCvtTable.convert(strMethod, idx)) {
-            params.push_back(strVal);
+//            params.push_back(strVal);
+            std::string strConverted=convert_string_to_utf8(strVal);
+            params.push_back(strConverted);
         }
 
         // parse string as JSON, insert bool/number/object/etc. value
@@ -368,7 +672,9 @@ Array RPCConvertValues(const std::string &strMethod, const std::vector<std::stri
                 }
                 else
                 {
-                    params.push_back(strVal);                    
+//                    params.push_back(strVal);                    
+                    std::string strConverted=convert_string_to_utf8(strVal);
+                    params.push_back(strConverted);
                 }
             }
             else
@@ -391,7 +697,16 @@ Array RPCConvertValues(const std::string &strMethod, const std::vector<std::stri
                         }
                         else
                         {
-                            params.push_back(strVal);                                            
+                            if(jVal.type() == bool_type)
+                            {
+                                params.push_back(jVal);                                            
+                            }
+                            else
+                            {
+                                std::string strConverted=convert_string_to_utf8(strVal);
+                                params.push_back(strConverted);
+    //                            params.push_back(strVal);                                            
+                            }
                         }
                     }
                 }

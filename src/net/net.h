@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef BITCOIN_NET_H
@@ -44,9 +44,9 @@ namespace boost {
 } // namespace boost
 
 /** Time between pings automatically sent out for latency probing and keepalive (in seconds). */
-static const int PING_INTERVAL = 2 * 60;
+static const int PING_INTERVAL = 10; //2 * 60;
 /** Time after which to disconnect, after waiting for a ping response (or inactivity). */
-static const int TIMEOUT_INTERVAL = 20 * 60;
+static const int TIMEOUT_INTERVAL = 60; //20 * 60;
 /** The maximum number of entries in an 'inv' protocol message */
 static const unsigned int MAX_INV_SZ = 50000;
 /** The maximum number of new addresses to accumulate before announcing. */
@@ -117,6 +117,7 @@ bool IsLimited(const CNetAddr& addr);
 bool AddLocal(const CService& addr, int nScore = LOCAL_NONE);
 bool AddLocal(const CNetAddr& addr, int nScore = LOCAL_NONE);
 bool SeenLocal(const CService& addr);
+bool SeenLocalAddr(const CService& addr);
 bool IsLocal(const CService& addr);
 bool GetLocal(CService &addr, const CNetAddr *paddrPeer = NULL);
 bool IsReachable(enum Network net);
@@ -285,6 +286,7 @@ public:
     bool fVerackackSent;
     bool fParameterSetVerified;
     bool fSyncedOnce;
+    bool fLastIgnoreIncoming;
     bool fCanConnectRemote;
     bool fCanConnectLocal;
     CKeyID kAddrRemote;

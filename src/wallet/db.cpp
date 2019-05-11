@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "wallet/db.h"
@@ -21,6 +21,8 @@
 #include <boost/filesystem.hpp>
 #include <boost/thread.hpp>
 #include <boost/version.hpp>
+#include <boost/foreach.hpp>
+#include <boost/scoped_ptr.hpp>
 
 #include <openssl/rand.h>
 
@@ -28,7 +30,7 @@ using namespace std;
 using namespace boost;
 
 
-unsigned int nWalletDBUpdated;
+//unsigned int nWalletDBUpdated;
 
 
 //
@@ -57,7 +59,7 @@ void CDBEnv::EnvShutdown()
     if (ret != 0)
         LogPrintf("CDBEnv::EnvShutdown : Error %d shutting down database environment: %s\n", ret, DbEnv::strerror(ret));
     if (!fMockDb)
-        DbEnv(0).remove(path.string().c_str(), 0);
+        DbEnv(0).remove(strPath.c_str(), 0);
 }
 
 CDBEnv::CDBEnv() : dbenv(DB_CXX_NO_EXCEPTIONS)
@@ -83,10 +85,10 @@ bool CDBEnv::Open(const boost::filesystem::path& pathIn)
 
     boost::this_thread::interruption_point();
 
-    path = pathIn;
-    filesystem::path pathLogDir = path / "database";
+    strPath = pathIn.string();
+    boost::filesystem::path pathLogDir = pathIn / "database";
     TryCreateDirectory(pathLogDir);
-    filesystem::path pathErrorFile = path / "db.log";
+    boost::filesystem::path pathErrorFile = pathIn / "db.log";
     LogPrintf("CDBEnv::Open : LogDir=%s ErrorFile=%s\n", pathLogDir.string(), pathErrorFile.string());
 
     unsigned int nEnvFlags = 0;
@@ -103,7 +105,7 @@ bool CDBEnv::Open(const boost::filesystem::path& pathIn)
     dbenv.set_flags(DB_AUTO_COMMIT, 1);
     dbenv.set_flags(DB_TXN_WRITE_NOSYNC, 1);
     dbenv.log_set_config(DB_LOG_AUTO_REMOVE, 1);
-    int ret = dbenv.open(path.string().c_str(),
+    int ret = dbenv.open(strPath.c_str(),
                          DB_CREATE |
                              DB_INIT_LOCK |
                              DB_INIT_LOG |
@@ -153,7 +155,8 @@ void CDBEnv::MakeMock()
     fMockDb = true;
 }
 
-CDBEnv::VerifyResult CDBEnv::Verify(std::string strFile, bool (*recoverFunc)(CDBEnv& dbenv, std::string strFile))
+//CDBConstEnv::VerifyResult CDBEnv::Verify(std::string strFile, bool (*recoverFunc)(CDBWrapEnv& dbenv, std::string strFile))
+CDBConstEnv::VerifyResult CDBEnv::Verify(std::string strFile)
 {
     LOCK(cs_db);
     assert(mapFileUseCount.count(strFile) == 0);
@@ -161,16 +164,25 @@ CDBEnv::VerifyResult CDBEnv::Verify(std::string strFile, bool (*recoverFunc)(CDB
     Db db(&dbenv, 0);
     int result = db.verify(strFile.c_str(), NULL, NULL, 0);
     if (result == 0)
-        return VERIFY_OK;
+        return CDBConstEnv::VERIFY_OK;
+    
+    return CDBConstEnv::RECOVER_FAIL;
+/*    
     else if (recoverFunc == NULL)
-        return RECOVER_FAIL;
+        return CDBConstEnv::RECOVER_FAIL;
 
     // Try to recover:
     bool fRecovered = (*recoverFunc)(*this, strFile);
-    return (fRecovered ? RECOVER_OK : RECOVER_FAIL);
+    return (fRecovered ? CDBConstEnv::RECOVER_OK : CDBConstEnv::RECOVER_FAIL);
+ */ 
 }
 
-bool CDBEnv::Salvage(std::string strFile, bool fAggressive, std::vector<CDBEnv::KeyValPair>& vResult)
+/* End of headers, beginning of key/value data */
+static const char *HEADER_END = "HEADER=END";
+/* End of key/value data */
+static const char *DATA_END = "DATA=END";
+
+bool CDBEnv::Salvage(std::string strFile, bool fAggressive, std::vector<CDBConstEnv::KeyValPair>& vResult)
 {
     LOCK(cs_db);
     assert(mapFileUseCount.count(strFile) == 0);
@@ -204,16 +216,28 @@ bool CDBEnv::Salvage(std::string strFile, bool fAggressive, std::vector<CDBEnv::
     // DATA=END
 
     string strLine;
-    while (!strDump.eof() && strLine != "HEADER=END")
+    while (!strDump.eof() && strLine != HEADER_END)
         getline(strDump, strLine); // Skip past header
 
     std::string keyHex, valueHex;
-    while (!strDump.eof() && keyHex != "DATA=END") {
+    while (!strDump.eof() && keyHex != DATA_END) {
         getline(strDump, keyHex);
-        if (keyHex != "DATA_END") {
+        if (keyHex != DATA_END) {
+            if (strDump.eof())
+               break;             
             getline(strDump, valueHex);
+            if (valueHex == DATA_END) {
+                LogPrintf("CDBEnv::Salvage: WARNING: Number of keys in data does not match number of values.\n");
+                break;
+            }
+              
             vResult.push_back(make_pair(ParseHex(keyHex), ParseHex(valueHex)));
         }
+    }
+
+    if (keyHex != DATA_END) {
+        LogPrintf("CDBEnv::Salvage: WARNING: Unexpected end of file while reading salvage output.\n");
+        return false;
     }
 
     return (result == 0);
@@ -226,6 +250,43 @@ void CDBEnv::CheckpointLSN(const std::string& strFile)
     if (fMockDb)
         return;
     dbenv.lsn_reset(strFile.c_str(), 0);
+}
+
+int CDBEnv::RenameDb(const std::string& strOldFileName, const std::string& strNewFileName)
+{
+    return dbenv.dbrename(NULL, strOldFileName.c_str(), NULL,
+                                      strNewFileName.c_str(), DB_AUTO_COMMIT);
+}
+
+bool CDBEnv::Recover(std::string strFile, std::vector<CDBConstEnv::KeyValPair>& SalvagedData)
+{
+    bool fSuccess = true;
+    boost::scoped_ptr<Db> pdbCopy(new Db(&dbenv, 0));
+    int ret = pdbCopy->open(NULL,               // Txn pointer
+                            strFile.c_str(),   // Filename
+                            "main",             // Logical db name
+                            DB_BTREE,           // Database type
+                            DB_CREATE,          // Flags
+                            0);
+    if (ret > 0)
+    {
+        LogPrintf("Cannot create database file %s\n", strFile);
+        return false;
+    }
+
+    DbTxn* ptxn = TxnBegin();
+    BOOST_FOREACH(CDBConstEnv::KeyValPair& row, SalvagedData)
+    {
+        Dbt datKey(&row.first[0], row.first.size());
+        Dbt datValue(&row.second[0], row.second.size());
+        int ret2 = pdbCopy->put(ptxn, &datKey, &datValue, DB_NOOVERWRITE);
+        if (ret2 > 0)
+            fSuccess = false;
+    }
+    ptxn->commit(0);
+    pdbCopy->close(0);
+
+    return fSuccess;        
 }
 
 
@@ -458,7 +519,7 @@ void CDBEnv::Flush(bool fShutdown)
                 dbenv.log_archive(&listp, DB_ARCH_REMOVE);
                 Close();
                 if (!fMockDb)
-                    boost::filesystem::remove_all(path / "database");
+                    boost::filesystem::remove_all(boost::filesystem::path(strPath) / "database");
             }
         }
     }

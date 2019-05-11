@@ -1,6 +1,6 @@
 // Copyright (c) 2009-2013 The Bitcoin developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #ifndef BITCOIN_NETBASE_H
@@ -101,6 +101,8 @@ class CNetAddr
         inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion) {
             READWRITE(FLATDATA(ip));
         }
+        
+        friend class CSubNet;       
 };
 
 class CSubNet

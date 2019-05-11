@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "utils/utilparse.h"
@@ -27,6 +27,125 @@ const unsigned char* GetAddressIDPtr(const CTxDestination& address)
     return aptr;
 }
 
+bool mc_ExtractOutputAssetQuantities(mc_Buffer *assets,string& reason,bool with_followons)
+{
+    int err;
+    uint32_t script_type=MC_SCR_ASSET_SCRIPT_TYPE_TRANSFER;
+    if(with_followons)
+    {        
+        script_type |= MC_SCR_ASSET_SCRIPT_TYPE_FOLLOWON;
+    }
+    for (int e = 0; e < mc_gState->m_TmpScript->GetNumElements(); e++)
+    {
+        mc_gState->m_TmpScript->SetElement(e);
+        err=mc_gState->m_TmpScript->GetAssetQuantities(assets,script_type);
+        if((err != MC_ERR_NOERROR) && (err != MC_ERR_WRONG_SCRIPT))
+        {
+            reason="Asset transfer script rejected - error in output transfer script";
+            return false;                                
+        }
+    }
+
+    return true;
+}
+
+bool mc_VerifyAssetPermissions(mc_Buffer *assets, vector<CTxDestination> addressRets, int required_permissions, uint32_t permission, string& reason)
+{
+    mc_EntityDetails entity;
+    int asset_count=-1;
+    
+    for(int i=0;i<assets->GetCount();i++)
+    {
+        if(mc_gState->m_Assets->FindEntityByFullRef(&entity,assets->GetRow(i)))
+        {
+            if( entity.Permissions() & (MC_PTP_SEND | MC_PTP_RECEIVE) )
+            {
+                if( (addressRets.size() != 1) || (required_permissions > 1) )
+                {
+                    reason="Sending restricted asset to non-standard and multisig addresses not allowed";
+                    return false;                                                    
+                }
+                if(assets->GetCount() > 1)
+                {
+                    if(asset_count < 0)
+                    {
+                        asset_count=0;
+                        for(int j=0;j<assets->GetCount();j++)
+                        {
+                            if(mc_GetABRefType(assets->GetRow(j)) != MC_AST_ASSET_REF_TYPE_SPECIAL)
+                            {
+                                asset_count++;
+                            }                            
+                        }
+                    }
+                    if(asset_count > 1)
+                    {
+                        if(permission == MC_PTP_SEND)
+                        {
+                            reason="One of multiple assets in input has per-asset permissions";
+                        }
+                        if(permission == MC_PTP_RECEIVE)
+                        {
+                            reason="One of multiple assets in output has per-asset permissions";
+                        }
+                        return false;                                
+                    }
+                }
+                if(entity.Permissions() & permission)
+                {
+                    int found=required_permissions;
+                    for(int j=0;j<(int)addressRets.size();j++)
+                    {
+                        if(mc_gState->m_Permissions->GetPermission(entity.GetTxID(),GetAddressIDPtr(addressRets[j]),permission))
+                        {
+                            found--;
+                        }
+                    }
+                    if(found > 0)
+                    {
+                        if(permission == MC_PTP_SEND)
+                        {
+                            reason="One of the inputs doesn't have per-asset send permission";
+                        }
+                        if(permission == MC_PTP_RECEIVE)
+                        {
+                            reason="One of the outputs doesn't have per-asset receive permission";
+                        }                    
+                        return false;                                
+                    }
+                }
+            }
+        }        
+    }
+    
+    return true;
+}
+
+bool HasPerOutputDataEntries(const CTxOut& txout,mc_Script *lpScript)
+{
+    if(mc_gState->m_NetworkParams->IsProtocolMultichain())
+    {
+        unsigned char *ptr;
+        int size;
+        const CScript& script1 = txout.scriptPubKey;        
+        CScript::const_iterator pc1 = script1.begin();
+        lpScript->Clear();
+        lpScript->SetScript((unsigned char*)(&pc1[0]),(size_t)(script1.end()-pc1),MC_SCR_TYPE_SCRIPTPUBKEY);
+
+        for (int e = 0; e < lpScript->GetNumElements(); e++)
+        {
+            lpScript->SetElement(e);
+            if(lpScript->GetRawData(&ptr,&size) == 0)      
+            {
+                return true;
+            }
+        }        
+    }
+
+    return false;
+}
+
+
 /* 
  * Parses txout script into asset-quantity buffer
  * Use it only with unspent or not yet created outputs
@@ -46,7 +165,7 @@ bool ParseMultichainTxOutToBuffer(uint256 hash,                                 
     int err,row,disallow_if_assets_found;
     int64_t quantity,total,last;
     int expected_allowed,expected_required;
-    uint32_t type,from,to,timestamp,type_ored;
+    uint32_t type,from,to,timestamp,type_ored,approval;
     bool issue_found;
     uint32_t new_entity_type;
     
@@ -77,113 +196,32 @@ bool ParseMultichainTxOutToBuffer(uint256 hash,                                 
         lpScript->SetScript((unsigned char*)(&pc1[0]),(size_t)(script1.end()-pc1),MC_SCR_TYPE_SCRIPTPUBKEY);
         if(allowed)                                                             // Checking permissions this output address have
         {
-            *allowed=0;
             CTxDestination addressRet;        
+
+            *allowed=0;
             if(ExtractDestinationScriptValid(script1, addressRet))
             {
-                const unsigned char *aptr;
-                
-                aptr=GetAddressIDPtr(addressRet);
-                if(aptr)
+                *allowed=CheckRequiredPermissions(addressRet,expected_allowed,mapSpecialEntity,NULL);
+                if(expected_allowed & MC_PTP_SEND)                
                 {
-                    if(expected_allowed & MC_PTP_SEND)
+                    if(*allowed & MC_PTP_SEND)
                     {
-                        if(mc_gState->m_Permissions->CanSend(NULL,aptr))
+                        if(*allowed & MC_PTP_RECEIVE)
                         {
-                            if(mc_gState->m_Permissions->CanReceive(NULL,aptr)) 
+                            *allowed -= MC_PTP_RECEIVE;
+                        }
+                        else
+                        {
+                            *allowed -= MC_PTP_SEND;
+                            if(mc_gState->m_Features->AnyoneCanReceiveEmpty())                                
                             {
-                                *allowed |= MC_PTP_SEND;
-                            }
-                            else
-                            {
-                                if(mc_gState->m_Features->AnyoneCanReceiveEmpty())                                
+                                if(txout.nValue == 0)
                                 {
-                                    if(txout.nValue == 0)
-                                    {
-                                        disallow_if_assets_found=1;
-                                        *allowed |= MC_PTP_SEND;
-                                    }
+                                    disallow_if_assets_found=1;
+                                    *allowed |= MC_PTP_SEND;
                                 }
                             }
-                        }                         
-                    }
-                    if(expected_allowed & MC_PTP_WRITE)
-                    {
-                        unsigned char *lpEntity=NULL;
-                        if(mapSpecialEntity)
-                        {
-                            std::map<uint32_t,uint256>::const_iterator it = mapSpecialEntity->find(MC_PTP_WRITE);
-                            if (it != mapSpecialEntity->end())
-                            {
-                                lpEntity=(unsigned char*)(&(it->second));
-                            }
                         }
-
-                        if(mc_gState->m_Permissions->CanWrite(lpEntity,aptr))
-                        {
-                            *allowed |= MC_PTP_WRITE;
-                        }                                                 
-                    }
-                    if(expected_allowed & MC_PTP_ISSUE)
-                    {
-                        unsigned char *lpEntity=NULL;
-
-                        if(mapSpecialEntity)
-                        {
-                            std::map<uint32_t,uint256>::const_iterator it = mapSpecialEntity->find(MC_PTP_ISSUE);
-                            if (it != mapSpecialEntity->end())
-                            {
-                                lpEntity=(unsigned char*)(&(it->second));
-                            }
-                        }
-
-                        if(mc_gState->m_Permissions->CanIssue(lpEntity,aptr))
-                        {
-                            *allowed |= MC_PTP_ISSUE;
-                        }                                                 
-                    }
-                    if(expected_allowed & MC_PTP_CREATE)
-                    {
-                        if(mc_gState->m_Permissions->CanCreate(NULL,aptr))
-                        {
-                            *allowed |= MC_PTP_CREATE;
-                        }                         
-                    }
-                    if(expected_allowed & MC_PTP_ADMIN)
-                    {
-                        unsigned char *lpEntity=NULL;
-
-                        if(mapSpecialEntity)
-                        {
-                            std::map<uint32_t,uint256>::const_iterator it = mapSpecialEntity->find(MC_PTP_ADMIN);
-                            if (it != mapSpecialEntity->end())
-                            {
-                                lpEntity=(unsigned char*)(&(it->second));
-                            }
-                        }
-
-                        if(mc_gState->m_Permissions->CanAdmin(lpEntity,aptr))
-                        {
-                            *allowed |= MC_PTP_ADMIN;
-                        }                                                 
-                    }
-                    if(expected_allowed & MC_PTP_ACTIVATE)
-                    {
-                        unsigned char *lpEntity=NULL;
-
-                        if(mapSpecialEntity)
-                        {
-                            std::map<uint32_t,uint256>::const_iterator it = mapSpecialEntity->find(MC_PTP_ACTIVATE);
-                            if (it != mapSpecialEntity->end())
-                            {
-                                lpEntity=(unsigned char*)(&(it->second));
-                            }
-                        }
-                        
-                        if(mc_gState->m_Permissions->CanActivate(lpEntity,aptr))
-                        {
-                            *allowed |= MC_PTP_ACTIVATE;
-                        }                                                 
                     }
                 }
             }
@@ -215,18 +253,7 @@ bool ParseMultichainTxOutToBuffer(uint256 hash,                                 
                 }
             }        
         }
-        
-        if(issue_found)
-        {
-            if(mc_gState->m_Features->FollowOnIssues() == 0)
-            {
-                if(total == 0)
-                {
-                    issue_found=false;
-                }
-            }
-        }
-        
+                
         if(issue_found)                                                         
         {
             if(hash != 0)
@@ -240,41 +267,27 @@ bool ParseMultichainTxOutToBuffer(uint256 hash,                                 
                         *allowed -= MC_PTP_SEND;                        
                     }
                     
-                    if((mc_gState->m_Features->ShortTxIDAsAssetRef() == 0) && (entity.IsUnconfirmedGenesis() != 0) )
+                    memcpy(buf,entity.GetFullRef(),MC_AST_ASSET_FULLREF_SIZE);
+                    row=amounts->Seek(buf);
+                    last=0;
+                    if(row >= 0)
                     {
-                        if(required)                                            // Unconfirmed genesis in protocol < 10007, cannot be spent
-                        {
-                            memset(buf,0,MC_AST_ASSET_FULLREF_SIZE);
-                            mc_SetABRefType(buf,MC_AST_ASSET_REF_TYPE_GENESIS);
-                            mc_SetABQuantity(buf,total);
-                            amounts->Add(buf);        
-                            *required |= MC_PTP_ISSUE;
-                        }
+                        last=mc_GetABQuantity(amounts->GetRow(row));
+                        total+=last;
+                        mc_SetABQuantity(amounts->GetRow(row),total);
                     }
-                    else            
+                    else
                     {
-                        memcpy(buf,entity.GetFullRef(),MC_AST_ASSET_FULLREF_SIZE);
-                        row=amounts->Seek(buf);
-                        last=0;
-                        if(row >= 0)
+                        mc_SetABQuantity(buf,total);
+                        amounts->Add(buf);                        
+                    }
+
+                    if(required)
+                    {
+                        if(expected_required == 0)                          
                         {
-                            last=mc_GetABQuantity(amounts->GetRow(row));
-                            total+=last;
-                            mc_SetABQuantity(amounts->GetRow(row),total);
-                        }
-                        else
-                        {
-                            mc_SetABQuantity(buf,total);
-                            amounts->Add(buf);                        
-                        }
-                        
-                        if(required)
-                        {
-                            if(expected_required == 0)                          
-                            {
-                                *required |= MC_PTP_ISSUE;
-                            }                            
-                        }
+                            *required |= MC_PTP_ISSUE;
+                        }                            
                     }
                 }                
                 else                                                            // Asset not found, no error but the caller should check required field
@@ -396,8 +409,23 @@ bool ParseMultichainTxOutToBuffer(uint256 hash,                                 
                             {
                                 *required |= MC_PTP_CREATE;                    
                             }
+                            if(new_entity_type == MC_ENT_TYPE_UPGRADE)
+                            {
+                                *required |= MC_PTP_CREATE | MC_PTP_ADMIN;                    
+                            }
                         }
                     }
+                    
+                    if(lpScript->GetNumElements() == 3) 
+                    {
+                        lpScript->SetElement(1);
+
+                        if(lpScript->GetApproval(&approval,&timestamp) == 0)
+                        {
+                            *required |= MC_PTP_ADMIN;                    
+                        }
+                    }
+                    
                     if(lpScript->GetNumElements() == 3)                         // Publish
                     {
                         unsigned char short_txid[MC_AST_SHORT_TXID_SIZE];
@@ -433,14 +461,6 @@ bool ParseMultichainTxOutToBuffer(uint256 hash,                                 
                                         }                                    
                                     }
                                 }
-                                else
-                                {
-                                    if(mc_gState->m_Features->OpDropDetailsScripts() == 0)// May be Follow-on details from v10007
-                                    {
-                                        strFailReason="Invalid publish script, not stream";
-                                        return false;                                                                    
-                                    }
-                                }                            
                             }                        
                             else
                             {
@@ -494,13 +514,13 @@ bool ParseMultichainTxOutToBuffer(uint256 hash,                                 
                         *required |= admin_type;
                         if( type & (MC_PTP_ADMIN | MC_PTP_MINE) )
                         {
-                            if(mc_gState->m_Features->CachedInputScript())
+                            if(mc_gState->m_NetworkParams->GetInt64Param("supportminerprecheck"))                                
                             {
-                                if(mc_gState->m_NetworkParams->GetInt64Param("supportminerprecheck"))                                
+                                if(entity.GetEntityType() == MC_ENT_TYPE_NONE)
                                 {
                                     *required |= MC_PTP_CACHED_SCRIPT_REQUIRED;
-                                }        
-                            }
+                                }
+                            }        
                         }
                         
                         if(hash == 0)
@@ -830,17 +850,27 @@ void LogAssetTxOut(string message,uint256 hash,int index,unsigned char* assetref
     string assetref="";
     if(assetrefbin)
     {
-        assetref += itostr((int)mc_GetLE(assetrefbin,4));
-        assetref += "-";
-        assetref += itostr((int)mc_GetLE(assetrefbin+4,4));
-        assetref += "-";
-        assetref += itostr((int)mc_GetLE(assetrefbin+8,2));        
+        if(mc_GetABRefType(assetrefbin) == MC_AST_ASSET_REF_TYPE_SHORT_TXID)
+        {
+            for(int i=0;i<8;i++)
+            {
+                assetref += strprintf("%02x",assetrefbin[MC_AST_SHORT_TXID_OFFSET+MC_AST_SHORT_TXID_SIZE-i-1]);
+            }
+        }
+        else
+        {
+            assetref += itostr((int)mc_GetLE(assetrefbin,4));
+            assetref += "-";
+            assetref += itostr((int)mc_GetLE(assetrefbin+4,4));
+            assetref += "-";
+            assetref += itostr((int)mc_GetLE(assetrefbin+8,2));        
+        }
     }
     else
     {
         assetref += "0-0-2";
     }
-    LogPrint("mcatxo", "mcatxo: %s: %s-%d %s %ld\n",message.c_str(),txid.c_str(),index,assetref.c_str(),quantity);
+    if(fDebug)LogPrint("mcatxo", "mcatxo: %s: %s-%d %s %ld\n",message.c_str(),txid.c_str(),index,assetref.c_str(),quantity);
 }
 
 bool AddressCanReceive(CTxDestination address)
@@ -879,3 +909,167 @@ bool AddressCanReceive(CTxDestination address)
     return true;
 }
 
+int CheckRequiredPermissions(const CTxDestination& addressRet,int expected_allowed,map<uint32_t, uint256>* mapSpecialEntity, string *strFailReason)
+{
+    int allowed=0;
+    const unsigned char *aptr;
+
+    aptr=GetAddressIDPtr(addressRet);
+    if(aptr)
+    {
+        if(expected_allowed & MC_PTP_SEND)
+        {
+            if(mc_gState->m_Permissions->CanSend(NULL,aptr))
+            {
+                allowed |= MC_PTP_SEND;
+                if(mc_gState->m_Permissions->CanReceive(NULL,aptr)) 
+                {
+                    allowed |= MC_PTP_RECEIVE;
+                }            
+            }    
+            if(strFailReason)
+            {
+                if( (allowed & MC_PTP_SEND) == 0 )
+                {
+                    *strFailReason="from-address doesn't have send or receive permission";
+                }
+            }
+        }
+        if(expected_allowed & MC_PTP_WRITE)
+        {
+            unsigned char *lpEntity=NULL;
+            if(mapSpecialEntity)
+            {
+                std::map<uint32_t,uint256>::const_iterator it = mapSpecialEntity->find(MC_PTP_WRITE);
+                if (it != mapSpecialEntity->end())
+                {
+                    lpEntity=(unsigned char*)(&(it->second));
+                }
+            }
+
+            if(mc_gState->m_Permissions->CanWrite(lpEntity,aptr))
+            {
+                allowed |= MC_PTP_WRITE;
+            }                                                 
+            if(strFailReason)
+            {
+                if( (allowed & MC_PTP_WRITE) == 0 )
+                {
+                    *strFailReason="Publishing in this stream is not allowed from this address";
+                }
+            }
+        }
+        if(expected_allowed & MC_PTP_ISSUE)
+        {
+            unsigned char *lpEntity=NULL;
+
+            if(mapSpecialEntity)
+            {
+                std::map<uint32_t,uint256>::const_iterator it = mapSpecialEntity->find(MC_PTP_ISSUE);
+                if (it != mapSpecialEntity->end())
+                {
+                    lpEntity=(unsigned char*)(&(it->second));
+                }
+            }
+
+            if(mc_gState->m_Permissions->CanIssue(lpEntity,aptr))
+            {
+                allowed |= MC_PTP_ISSUE;
+            }                 
+            
+            if(strFailReason)
+            {
+                if( (allowed & MC_PTP_ISSUE) == 0 )
+                {
+                    if(lpEntity)
+                    {
+                        *strFailReason="Issuing more units for this asset is not allowed from this address";                        
+                    }
+                    else
+                    {
+                        *strFailReason="from-address doesn't have issue permission";
+                    }
+                }
+            }            
+        }
+        if(expected_allowed & MC_PTP_CREATE)
+        {
+            if(mc_gState->m_Permissions->CanCreate(NULL,aptr))
+            {
+                allowed |= MC_PTP_CREATE;
+            }                         
+            if(strFailReason)
+            {
+                if( (allowed & MC_PTP_CREATE) == 0 )
+                {
+                    *strFailReason="from-address doesn't have create permission";
+                }
+            }
+        }
+        if(expected_allowed & MC_PTP_ADMIN)
+        {
+            unsigned char *lpEntity=NULL;
+
+            if(mapSpecialEntity)
+            {
+                std::map<uint32_t,uint256>::const_iterator it = mapSpecialEntity->find(MC_PTP_ADMIN);
+                if (it != mapSpecialEntity->end())
+                {
+                    lpEntity=(unsigned char*)(&(it->second));
+                }
+            }
+
+            if(mc_gState->m_Permissions->CanAdmin(lpEntity,aptr))
+            {
+                allowed |= MC_PTP_ADMIN;
+            }                                                 
+            if(strFailReason)
+            {
+                if( (allowed & MC_PTP_ADMIN) == 0 )
+                {
+                    if(lpEntity)
+                    {
+                        *strFailReason="from-address doesn't have admin permission for this entity";                        
+                    }
+                    else
+                    {
+                        *strFailReason="from-address doesn't have admin permission";
+                    }
+                }
+            }            
+        }
+        if(expected_allowed & MC_PTP_ACTIVATE)
+        {
+            unsigned char *lpEntity=NULL;
+            if(mapSpecialEntity)
+            {
+                std::map<uint32_t,uint256>::const_iterator it = mapSpecialEntity->find(MC_PTP_ACTIVATE);
+                if (it != mapSpecialEntity->end())
+                {
+                    lpEntity=(unsigned char*)(&(it->second));
+                }
+            }
+
+            if(mc_gState->m_Permissions->CanActivate(lpEntity,aptr))
+            {
+                allowed |= MC_PTP_ACTIVATE;
+            }                                                 
+            if(strFailReason)
+            {
+                if( (allowed & MC_PTP_ACTIVATE) == 0 )
+                {
+                    if(lpEntity)
+                    {
+                        *strFailReason="from-address doesn't have activate or admin permission for this entity";                        
+                    }
+                    else
+                    {
+                        *strFailReason="from-address doesn't have admin or activate permission";
+                    }
+                }
+            }            
+        }
+    }
+    
+    return allowed;
+}

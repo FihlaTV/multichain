@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "multichain/multichain.h"
@@ -35,14 +35,7 @@ void mc_EntityDB::Zero()
     m_KeyOffset=0;
     m_KeySize=36;                                   
     m_ValueOffset=36;
-    if(mc_gState->m_Features->FollowOnIssues())
-    {
-        m_ValueSize=28;  
-    }
-    else
-    {
-        m_ValueSize=12;
-    }
+    m_ValueSize=28;  
     m_TotalSize=m_KeySize+m_ValueSize;
 }
 
@@ -50,14 +43,7 @@ void mc_EntityDB::Zero()
 
 void mc_EntityDB::SetName(const char* name)
 {
-    if(mc_gState->m_Features->FollowOnIssues())
-    {
-        mc_GetFullFileName(name,"entities",".db",MC_FOM_RELATIVE_TO_DATADIR | MC_FOM_CREATE_DIR,m_FileName);
-    }
-    else
-    {
-        mc_GetFullFileName(name,"assets",".db",MC_FOM_RELATIVE_TO_DATADIR | MC_FOM_CREATE_DIR,m_FileName);        
-    }
+    mc_GetFullFileName(name,"entities",".db",MC_FOM_RELATIVE_TO_DATADIR | MC_FOM_CREATE_DIR,m_FileName);
 }
 
 /** Open database */
@@ -95,14 +81,7 @@ void mc_EntityLedger::Zero()
     m_KeyOffset=0;
     m_KeySize=36;                                   
     m_ValueOffset=36;
-    if(mc_gState->m_Features->FollowOnIssues())
-    {
-        m_ValueSize=60;  
-    }
-    else
-    {
-        m_ValueSize=28;
-    }
+    m_ValueSize=60;  
     m_TotalSize=m_KeySize+m_ValueSize;
 }
 
@@ -110,14 +89,7 @@ void mc_EntityLedger::Zero()
 
 void mc_EntityLedger::SetName(const char* name)
 {
-    if(mc_gState->m_Features->FollowOnIssues())
-    {
-        mc_GetFullFileName(name,"entities",".dat",MC_FOM_RELATIVE_TO_DATADIR,m_FileName);
-    }
-    else
-    {
-        mc_GetFullFileName(name,"assets",".dat",MC_FOM_RELATIVE_TO_DATADIR,m_FileName);        
-    }
+    mc_GetFullFileName(name,"entities",".dat",MC_FOM_RELATIVE_TO_DATADIR,m_FileName);
 }
 
 /** Open ledger file */
@@ -131,6 +103,14 @@ int mc_EntityLedger::Open()
     
     m_FileHan=open(m_FileName,_O_BINARY | O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
     return m_FileHan;            
+}
+
+void mc_EntityLedger::Flush()
+{
+    if(m_FileHan>0)
+    {
+        __US_FlushFile(m_FileHan);
+    }    
 }
 
 /** Close ledger file */
@@ -148,7 +128,6 @@ int mc_EntityLedger::Close()
 int mc_EntityLedger::GetRow(int64_t pos, mc_EntityLedgerRow* row)
 {
     int size;
-    unsigned char buf[64];
     if(m_FileHan<=0)
     {
         return MC_ERR_INTERNAL_ERROR;
@@ -161,35 +140,14 @@ int mc_EntityLedger::GetRow(int64_t pos, mc_EntityLedgerRow* row)
     
     row->Zero();
 
-    if(mc_gState->m_Features->FollowOnIssues())
+    if(read(m_FileHan,(unsigned char*)row+m_KeyOffset,m_TotalSize) != m_TotalSize)
     {
-        if(read(m_FileHan,(unsigned char*)row+m_KeyOffset,m_TotalSize) != m_TotalSize)
-        {
-            return MC_ERR_FILE_READ_ERROR;
-        }
-    }
-    else
-    {
-        if(read(m_FileHan,buf,m_TotalSize) != m_TotalSize)
-        {
-            return MC_ERR_FILE_READ_ERROR;
-        }        
-        memcpy(row->m_Key,buf+ 0,MC_ENT_KEY_SIZE);
-        row->m_KeyType=mc_GetLE(buf+32,4);
-        row->m_Block=mc_GetLE(buf+36,4);
-        row->m_Offset=mc_GetLE(buf+40,4);
-        row->m_Quantity=mc_GetLE(buf+44,8);
-        row->m_PrevPos=mc_GetLE(buf+52,8);
-        row->m_ScriptSize=mc_GetLE(buf+60,4);
-        row->m_EntityType=MC_ENT_TYPE_ASSET;
-        row->m_FirstPos=pos;
-        row->m_LastPos=0;
-        row->m_ChainPos=pos;
+        return MC_ERR_FILE_READ_ERROR;
     }
     
     size=row->m_ScriptSize;
 
-    if((size>0) && (size<=MC_ENT_MAX_SCRIPT_SIZE))
+    if((size>0) && (size<=MC_ENT_SCRIPT_ALLOC_SIZE))
     {
         size=mc_AllocSize(size,m_TotalSize,1);
         if(read(m_FileHan,row->m_Script,size) != size)
@@ -223,7 +181,6 @@ int64_t mc_EntityLedger::GetSize()
 int mc_EntityLedger::SetRow(int64_t pos, mc_EntityLedgerRow* row)
 {
     int size;
-    unsigned char buf[64];
     
     if(m_FileHan<=0)
     {
@@ -237,32 +194,13 @@ int mc_EntityLedger::SetRow(int64_t pos, mc_EntityLedgerRow* row)
        
     size=row->m_ScriptSize;
     
-    if((size>=0) && (size<=MC_ENT_MAX_SCRIPT_SIZE))
+    if((size>=0) && (size<=MC_ENT_SCRIPT_ALLOC_SIZE))
     {
-        if(mc_gState->m_Features->FollowOnIssues())
+        size=mc_AllocSize(size,m_TotalSize,1);
+        if(write(m_FileHan,row,m_TotalSize) != m_TotalSize)
         {
-            size=mc_AllocSize(size,m_TotalSize,1);
-            if(write(m_FileHan,row,m_TotalSize) != m_TotalSize)
-            {
-                return -1;
-            }        
-        }
-        else
-        {
-            size=mc_AllocSize(size,m_TotalSize,1);
-            memset(buf,0,64);
-            memcpy(buf+ 0,row->m_Key,MC_ENT_KEY_SIZE);
-            mc_PutLE(buf+32,&(row->m_KeyType),4);
-            mc_PutLE(buf+36,&(row->m_Block),4);
-            mc_PutLE(buf+40,&(row->m_Offset),4);
-            mc_PutLE(buf+44,&(row->m_Quantity),8);
-            mc_PutLE(buf+52,&(row->m_PrevPos),8);
-            mc_PutLE(buf+60,&(row->m_ScriptSize),4);
-            if(write(m_FileHan,buf,m_TotalSize) != m_TotalSize)
-            {
-                return -1;
-            }        
-        }
+            return -1;
+        }        
         if(size)
         {
             if(write(m_FileHan,row->m_Script,size) != size)
@@ -290,20 +228,23 @@ int mc_AssetDB::Zero()
     m_Database = NULL;
     m_Ledger = NULL;
     m_MemPool = NULL;
+    m_TmpRelevantEntities = NULL;
+    m_ShortTxIDCache = NULL;
     m_Name[0]=0x00; 
     m_Block=-1;    
     m_PrevPos=-1;
     m_Pos=0;
-    m_DBRowCount=0;            
+    m_DBRowCount=0;     
+    m_RollBackPos.Zero();
     
     return MC_ERR_NOERROR;
 }
 
 int mc_AssetDB::Initialize(const char *name,int mode)
 {
-    int err,value_len;    
+    int err,value_len,take_it;    
     int32_t adbBlock,aldBlock;
-    uint64_t adbLastPos,aldLastPos;
+    uint64_t adbLastPos,aldLastPos,this_pos;
     
     unsigned char *ptr;
 
@@ -367,6 +308,12 @@ int mc_AssetDB::Initialize(const char *name,int mode)
     m_MemPool=new mc_Buffer;    
     err=m_MemPool->Initialize(m_Ledger->m_KeySize,sizeof(mc_EntityLedgerRow),MC_BUF_MODE_MAP);
     
+    m_TmpRelevantEntities=new mc_Buffer;
+    err=m_TmpRelevantEntities->Initialize(MC_AST_SHORT_TXID_SIZE,MC_AST_SHORT_TXID_SIZE,MC_BUF_MODE_MAP);
+    
+    m_ShortTxIDCache=new mc_Buffer;    
+    err=m_ShortTxIDCache->Initialize(MC_AST_SHORT_TXID_SIZE,MC_AST_SHORT_TXID_SIZE+MC_PLS_SIZE_ENTITY,MC_BUF_MODE_MAP);
+    
     m_Block=adbBlock;
     m_PrevPos=adbLastPos;            
     m_Pos=adbLastPos+m_Ledger->m_TotalSize;            
@@ -403,6 +350,42 @@ int mc_AssetDB::Initialize(const char *name,int mode)
     }
 
     m_Ledger->Close();
+    
+    if(adbBlock < aldBlock)
+    {
+        if(m_Ledger->Open() <= 0)
+        {
+            return MC_ERR_DBOPEN_ERROR;
+        }
+    
+        this_pos=aldLastPos;
+        take_it=1;
+
+        while(take_it && (this_pos>0))
+        {            
+            m_Ledger->GetRow(this_pos,&aldRow);
+        
+            if(aldRow.m_Block <= adbBlock)
+            {
+                take_it=0;
+            }
+            if(take_it)
+            {
+                this_pos=aldRow.m_PrevPos;
+            }
+        }
+
+        aldLastPos=this_pos;
+
+        m_Ledger->GetRow(0,&aldRow);
+        aldRow.m_Block=adbBlock;
+        aldRow.m_PrevPos=m_PrevPos;
+        m_Ledger->SetZeroRow(&aldRow);
+        
+        m_Ledger->Close();  
+
+        aldBlock=adbBlock;
+    }
     
     if(adbBlock != aldBlock)
     {
@@ -451,10 +434,53 @@ int mc_AssetDB::Destroy()
         delete m_MemPool;
     }  
     
+    if(m_TmpRelevantEntities)
+    {
+        delete m_TmpRelevantEntities;
+    }  
+    
+    if(m_ShortTxIDCache)
+    {
+        delete m_ShortTxIDCache;
+    }  
+    
     Zero();
     
     return MC_ERR_NOERROR;
 }
+
+int mc_AssetDB::SetCheckPoint()
+{
+    m_CheckPointPos=m_Pos;
+    m_CheckPointMemPoolSize=m_MemPool->GetCount();
+    
+    return MC_ERR_NOERROR;
+}
+
+int mc_AssetDB::RollBackToCheckPoint()
+{
+    m_Pos=m_CheckPointPos;
+    m_MemPool->SetCount(m_CheckPointMemPoolSize);
+    
+    return MC_ERR_NOERROR;
+}
+
+
+int mc_AssetDB::SetRollBackPos(int block,int offset,int inmempool)
+{
+    m_RollBackPos.m_Block=block;
+    m_RollBackPos.m_Offset=offset;
+    m_RollBackPos.m_InMempool=inmempool;
+    
+    return MC_ERR_NOERROR;
+}
+
+void mc_AssetDB::ResetRollBackPos()
+{
+    m_RollBackPos.Zero();
+}
+
+
 
 int mc_AssetDB::GetEntity(mc_EntityLedgerRow* row)
 {    
@@ -491,45 +517,54 @@ int mc_AssetDB::GetEntity(mc_EntityLedgerRow* row)
         row->m_ChainPos=adbRow.m_ChainPos;
         m_Ledger->Close();
         
+        if(m_RollBackPos.InBlock())
+        {
+            if(m_RollBackPos.IsOut(row->m_Block,row->m_Offset))
+            {
+                result=0;                
+            }
+        }
         return result;
     }
     
-    mprow=m_MemPool->Seek((unsigned char*)row);
-    if(mprow>=0)
+    if(m_RollBackPos.InBlock() == 0)
     {
-        if( (((mc_EntityLedgerRow*)(m_MemPool->GetRow(mprow)))->m_KeyType  & MC_ENT_KEYTYPE_MASK) != MC_ENT_KEYTYPE_TXID)
+        mprow=m_MemPool->Seek((unsigned char*)row);
+        if(mprow>=0)
         {
-            mprow--;
-            if(mprow>=0)
+            if( (((mc_EntityLedgerRow*)(m_MemPool->GetRow(mprow)))->m_KeyType  & MC_ENT_KEYTYPE_MASK) != MC_ENT_KEYTYPE_TXID)
             {
-                if( (((mc_EntityLedgerRow*)(m_MemPool->GetRow(mprow)))->m_KeyType  & MC_ENT_KEYTYPE_MASK) != MC_ENT_KEYTYPE_TXID)
+                mprow--;
+                if(mprow>=0)
                 {
-                    mprow--;                    
-                    if(mprow>=0)
+                    if( (((mc_EntityLedgerRow*)(m_MemPool->GetRow(mprow)))->m_KeyType  & MC_ENT_KEYTYPE_MASK) != MC_ENT_KEYTYPE_TXID)
                     {
-                        if( (((mc_EntityLedgerRow*)(m_MemPool->GetRow(mprow)))->m_KeyType  & MC_ENT_KEYTYPE_MASK) != MC_ENT_KEYTYPE_TXID)
+                        mprow--;                    
+                        if(mprow>=0)
                         {
-                            mprow--;                    
-                            if(mprow>=0)
+                            if( (((mc_EntityLedgerRow*)(m_MemPool->GetRow(mprow)))->m_KeyType  & MC_ENT_KEYTYPE_MASK) != MC_ENT_KEYTYPE_TXID)
                             {
-                                if( (((mc_EntityLedgerRow*)(m_MemPool->GetRow(mprow)))->m_KeyType  & MC_ENT_KEYTYPE_MASK) != MC_ENT_KEYTYPE_TXID)
+                                mprow--;                    
+                                if(mprow>=0)
                                 {
-                                    mprow=-1;
+                                    if( (((mc_EntityLedgerRow*)(m_MemPool->GetRow(mprow)))->m_KeyType  & MC_ENT_KEYTYPE_MASK) != MC_ENT_KEYTYPE_TXID)
+                                    {
+                                        mprow=-1;
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            if(mprow<0)
+            {
+                return 0;
+            }
+            memcpy(row,m_MemPool->GetRow(mprow),sizeof(mc_EntityLedgerRow));
+            return 1;
         }
-        if(mprow<0)
-        {
-            return 0;
-        }
-        memcpy(row,m_MemPool->GetRow(mprow),sizeof(mc_EntityLedgerRow));
-        return 1;
     }
-
 
     return 0;
 }
@@ -562,7 +597,31 @@ void mc_EntityDetails::Set(mc_EntityLedgerRow* row)
         }
         m_Flags |= MC_ENT_FLAG_OFFSET_IS_SET;
     }
+
+    m_Permissions=0;
+    m_Restrictions=0;
+    m_ScriptPermissions=0;
     
+    switch(m_LedgerRow.m_EntityType)
+    {
+        case MC_ENT_TYPE_ASSET:
+            m_Permissions |= MC_PTP_ADMIN | MC_PTP_ISSUE;
+            if(mc_gState->m_Features->PerAssetPermissions())
+            {
+                m_Permissions |= MC_PTP_ACTIVATE;                
+            }
+            break;
+        case MC_ENT_TYPE_STREAM:
+            m_Permissions |= MC_PTP_ADMIN | MC_PTP_ACTIVATE | MC_PTP_WRITE;
+            break;
+        default:
+            if(m_LedgerRow.m_EntityType <= MC_ENT_TYPE_STREAM_MAX)
+            {
+                m_Permissions = MC_PTP_WRITE | MC_PTP_ACTIVATE;
+            }
+            break;            
+    }
+            
     if(script_size)
     {
         value_offset=mc_FindSpecialParamInDetailsScript(m_LedgerRow.m_Script,m_LedgerRow.m_ScriptSize,MC_ENT_SPRM_NAME,&value_size);
@@ -572,42 +631,67 @@ void mc_EntityDetails::Set(mc_EntityLedgerRow* row)
             dname_buf[0]=0xff;
             value_offset=mc_FindNamedParamInDetailsScript(m_LedgerRow.m_Script,m_LedgerRow.m_ScriptSize,(char*)dname_buf,&value_size);
         }
-        if(mc_gState->m_Features->Streams())
-        {
-            if(value_offset < m_LedgerRow.m_ScriptSize)
-            {            
-                if(value_size == 2)
+        if(value_offset < m_LedgerRow.m_ScriptSize)
+        {            
+            if(value_size == 2)
+            {
+                if((char)m_LedgerRow.m_Script[value_offset] == '*')
                 {
-                    if((char)m_LedgerRow.m_Script[value_offset] == '*')
-                    {
-                        value_offset=m_LedgerRow.m_ScriptSize;
-                        value_size=0;
-                    }
+                    value_offset=m_LedgerRow.m_ScriptSize;
+                    value_size=0;
                 }
             }
         }
         if(value_offset < m_LedgerRow.m_ScriptSize)
         {            
-            memcpy(m_Name,m_LedgerRow.m_Script+value_offset,value_size);
+            if(value_size > MC_ENT_MAX_NAME_SIZE)
+            {
+                value_size=MC_ENT_MAX_NAME_SIZE;
+                memcpy(m_Name,m_LedgerRow.m_Script+value_offset,value_size);
+                m_Name[value_size]=0;
+            }
+            else
+            {
+                memcpy(m_Name,m_LedgerRow.m_Script+value_offset,value_size);                
+            }
             mc_StringLowerCase(m_Name,value_size);
             m_Flags |= MC_ENT_FLAG_NAME_IS_SET;
         }
+        
+        value_offset=mc_FindSpecialParamInDetailsScript(m_LedgerRow.m_Script,m_LedgerRow.m_ScriptSize,MC_ENT_SPRM_PERMISSIONS,&value_size);
+        if(value_offset <= m_LedgerRow.m_ScriptSize)
+        {
+            if( (value_offset != m_LedgerRow.m_ScriptSize) || (mc_gState->m_Features->FixedLegacyPermissionRestrictionFlag() == 0)) 
+            {
+                m_Permissions |= MC_PTP_SPECIFIED;
+                if((value_size>0) && (value_size<=4))
+                {
+                    m_ScriptPermissions=(uint32_t)mc_GetLE(m_LedgerRow.m_Script+value_offset,value_size);
+                    m_Permissions |= m_ScriptPermissions;
+                }
+            }
+        }
+        
+        value_offset=mc_FindSpecialParamInDetailsScript(m_LedgerRow.m_Script,m_LedgerRow.m_ScriptSize,MC_ENT_SPRM_RESTRICTIONS,&value_size);
+        if(value_offset <= m_LedgerRow.m_ScriptSize)
+        {
+            if( (value_offset != m_LedgerRow.m_ScriptSize) || (mc_gState->m_Features->FixedLegacyPermissionRestrictionFlag() == 0))
+            {
+                if((value_size>0) && (value_size<=4))
+                {
+                    m_Restrictions |= (uint32_t)mc_GetLE(m_LedgerRow.m_Script+value_offset,value_size);
+                }
+            }
+        }
+        
     }
     
     mc_ZeroABRaw(m_FullRef);
-    if(mc_gState->m_Features->ShortTxIDAsAssetRef())
-    {
-        memcpy(m_FullRef+MC_AST_SHORT_TXID_OFFSET,m_LedgerRow.m_Key+MC_AST_SHORT_TXID_OFFSET,MC_AST_SHORT_TXID_SIZE);
-        mc_SetABRefType(m_FullRef,MC_AST_ASSET_REF_TYPE_SHORT_TXID);
-    }
-    else
-    {
-        memcpy(m_FullRef,m_Ref,MC_AST_ASSET_REF_SIZE);
-        mc_SetABRefType(m_FullRef,MC_AST_ASSET_REF_TYPE_REF);
-    }
+    memcpy(m_FullRef+MC_AST_SHORT_TXID_OFFSET,m_LedgerRow.m_Key+MC_AST_SHORT_TXID_OFFSET,MC_AST_SHORT_TXID_SIZE);
+    mc_SetABRefType(m_FullRef,MC_AST_ASSET_REF_TYPE_SHORT_TXID);
 }
 
-int mc_AssetDB::InsertStream(const void* txid, int offset, int entity_type, const void *script,size_t script_size, const void* special_script, size_t special_script_size,int update_mempool)
+int mc_AssetDB::InsertEntity(const void* txid, int offset, int entity_type, const void *script,size_t script_size, const void* special_script, size_t special_script_size,int update_mempool)
 {
     mc_EntityLedgerRow aldRow;
     mc_EntityDetails details;
@@ -616,6 +700,7 @@ int mc_AssetDB::InsertStream(const void* txid, int offset, int entity_type, cons
     uint32_t value_offset;
     size_t value_size;
     char stream_name[MC_ENT_MAX_NAME_SIZE+1];
+    uint32_t upgrade_start_block;
     
     aldRow.Zero();
     memcpy(aldRow.m_Key,txid,MC_ENT_KEY_SIZE);
@@ -651,6 +736,14 @@ int mc_AssetDB::InsertStream(const void* txid, int offset, int entity_type, cons
             {
                 if(*((unsigned char*)script+value_offset+value_size-1))
                 {
+                    if(value_size > MC_ENT_MAX_NAME_SIZE)
+                    {
+                        if(mc_gState->m_Features->FixedIn1001120003())
+                        {
+                            return MC_ERR_ERROR_IN_SCRIPT;                                            
+                        }
+                        value_size=MC_ENT_MAX_NAME_SIZE;
+                    }
                     memcpy(stream_name,(unsigned char*)script+value_offset,value_size);
                     stream_name[value_size]=0x00;
                     lpDetails->SetSpecialParamValue(MC_ENT_SPRM_NAME,(unsigned char*)stream_name,strlen(stream_name)+1);            
@@ -658,6 +751,40 @@ int mc_AssetDB::InsertStream(const void* txid, int offset, int entity_type, cons
             }
         }
     }
+
+    upgrade_start_block=0;
+    if(entity_type == MC_ENT_TYPE_UPGRADE)
+    {
+        if(script)
+        {
+            if(mc_gState->m_Features->ParameterUpgrades() == 0)
+            {
+                value_offset=mc_FindSpecialParamInDetailsScript((unsigned char*)script,script_size,MC_ENT_SPRM_UPGRADE_PROTOCOL_VERSION,&value_size);
+                if(value_offset == script_size)
+                {
+                    return MC_ERR_ERROR_IN_SCRIPT;                                            
+                }
+                if( (value_size <=0) || (value_size > 4) )
+                {
+                    return MC_ERR_ERROR_IN_SCRIPT;                        
+                }
+                if((int)mc_GetLE((unsigned char*)script+value_offset,value_size) < 0)
+                {
+                    return MC_ERR_ERROR_IN_SCRIPT;                        
+                }
+            }
+            value_offset=mc_FindSpecialParamInDetailsScript((unsigned char*)script,script_size,MC_ENT_SPRM_UPGRADE_START_BLOCK,&value_size);
+            if(value_offset != script_size)
+            {
+                if( (value_size <=0) || (value_size > 4) )
+                {
+                    return MC_ERR_ERROR_IN_SCRIPT;                        
+                }
+                upgrade_start_block=(uint32_t)mc_GetLE((unsigned char*)script+value_offset,value_size);
+            }
+        }
+    }
+
     
     if(lpDetails->m_Size)
     {
@@ -745,20 +872,22 @@ int mc_AssetDB::InsertStream(const void* txid, int offset, int entity_type, cons
                 return MC_ERR_FOUND;
             }            
         }
-
-        
     }    
 
+    if(entity_type == MC_ENT_TYPE_UPGRADE)
+    {
+        return mc_gState->m_Permissions->SetApproval((unsigned char*)txid+MC_AST_SHORT_TXID_OFFSET,1,NULL,upgrade_start_block,mc_TimeNowAsUInt(),MC_PFL_ENTITY_GENESIS,update_mempool,offset);
+    }
+    
     return MC_ERR_NOERROR;    
 }
 
 
-int mc_AssetDB::InsertAsset(const void* txid, int offset, uint64_t quantity, const char *name, int multiple, const void* script, size_t script_size, const void* special_script, size_t special_script_size,int update_mempool)
+int mc_AssetDB::InsertAsset(const void* txid, int offset, int asset_type, uint64_t quantity, const char *name, int multiple, const void* script, size_t script_size, const void* special_script, size_t special_script_size,int update_mempool)
 {
     mc_EntityLedgerRow aldRow;
     mc_EntityDetails details;
     
-    unsigned char dname_buf[6];
     int pass;
     uint32_t value_offset;
     size_t value_size;
@@ -774,7 +903,7 @@ int mc_AssetDB::InsertAsset(const void* txid, int offset, uint64_t quantity, con
         aldRow.m_Offset=-(m_MemPool->GetCount()+1);
     }
     aldRow.m_Quantity=quantity;
-    aldRow.m_EntityType=MC_ENT_TYPE_ASSET;
+    aldRow.m_EntityType=asset_type;
     aldRow.m_FirstPos=-(m_MemPool->GetCount()+1);//-1;                          // Unconfirmed issue, from 10007 we can create followons for them, so we should differentiate
     aldRow.m_LastPos=0;
     aldRow.m_ChainPos=-1;
@@ -790,30 +919,17 @@ int mc_AssetDB::InsertAsset(const void* txid, int offset, uint64_t quantity, con
     }
 
     add_param=true;
-    if(mc_gState->m_Features->OpDropDetailsScripts())
+    if(script)
     {
-        if(script)
+        if(mc_FindSpecialParamInDetailsScript((unsigned char*)script,script_size,MC_ENT_SPRM_ASSET_MULTIPLE,&value_size) != script_size)
         {
-            if(mc_FindSpecialParamInDetailsScript((unsigned char*)script,script_size,MC_ENT_SPRM_ASSET_MULTIPLE,&value_size) != script_size)
-            {
-                add_param=false;                                
-            }
+            add_param=false;                                
         }
     }
 
     if(add_param)
     {
-        if(mc_gState->m_Features->SpecialParamsInDetailsScript())    
-        {
-            lpDetails->SetSpecialParamValue(MC_ENT_SPRM_ASSET_MULTIPLE,(unsigned char*)&multiple,sizeof(multiple));
-        }
-        else
-        {
-            if(multiple != 1)
-            {
-                lpDetails->SetParamValue("multiple",strlen("multiple"),(unsigned char*)&multiple,sizeof(multiple));       
-            }
-        }    
+        lpDetails->SetSpecialParamValue(MC_ENT_SPRM_ASSET_MULTIPLE,(unsigned char*)&multiple,sizeof(multiple));
     }
     
     add_param=true;
@@ -836,17 +952,7 @@ int mc_AssetDB::InsertAsset(const void* txid, int offset, uint64_t quantity, con
     {
         if(name && (strlen(name) > 0))
         {
-            if(mc_gState->m_Features->SpecialParamsInDetailsScript())    
-            {
-                lpDetails->SetSpecialParamValue(MC_ENT_SPRM_NAME,(unsigned char*)name,strlen(name)+1);            
-            }
-            else
-            {
-                lpDetails->SetParamValue("name",strlen("name"),(unsigned char*)name,strlen(name));
-                strcpy((char*)dname_buf+1,"name");
-                dname_buf[0]=0xff;
-                lpDetails->SetParamValue((char*)dname_buf,5,(unsigned char*)name,strlen(name)+1);
-            }
+            lpDetails->SetSpecialParamValue(MC_ENT_SPRM_NAME,(unsigned char*)name,strlen(name)+1);            
         }
     }
     
@@ -961,14 +1067,6 @@ int mc_AssetDB::InsertAssetFollowOn(const void* txid, int offset, uint64_t quant
     {        
         return MC_ERR_NOT_FOUND;
     }    
-    
-    if(mc_gState->m_Features->ShortTxIDAsAssetRef() == 0)
-    {
-        if(aldRow.m_PrevPos < 0)                                                // Unconfirmed genesis for protocol < 10007
-        {
-            return MC_ERR_NOT_FOUND;        
-        }        
-    }
     
     value_offset=mc_FindSpecialParamInDetailsScript(aldRow.m_Script,aldRow.m_ScriptSize,MC_ENT_SPRM_FOLLOW_ONS,&value_size);
     if(value_offset == aldRow.m_ScriptSize)
@@ -1198,49 +1296,6 @@ int mc_AssetDB::Commit()
                                                 (char*)&adbRow+m_Database->m_ValueOffset,m_Database->m_ValueSize,MC_OPT_DB_DATABASE_TRANSACTIONAL);
                             }
                         }
-/*                        
-                        if(aldRow.m_KeyType == (MC_ENT_KEYTYPE_FOLLOW_ON | MC_ENT_KEYTYPE_TXID))
-                        {
-                            err=m_Ledger->GetRow(aldRow.m_FirstPos,&aldRow);
-                            details.Set(&aldRow);
-
-                            adbRow.Zero();
-
-                            memset(adbRow.m_Key,0,MC_ENT_KEY_SIZE);
-                            memcpy(adbRow.m_Key,details.m_LedgerRow.m_Key,MC_ENT_KEY_SIZE);
-                            adbRow.m_KeyType=MC_ENT_KEYTYPE_TXID;
-
-                            ptr=(unsigned char*)m_Database->m_DB->Read((char*)&adbRow+m_Database->m_KeyOffset,m_Database->m_KeySize,&value_len,0,&err);
-
-                            if(ptr)
-                            {         
-                                memcpy((char*)&adbRow+m_Database->m_ValueOffset,ptr,m_Database->m_ValueSize);
-                                adbRow.m_ChainPos=m_Pos;                                
-                                err=m_Database->m_DB->Write((char*)&adbRow+m_Database->m_KeyOffset,m_Database->m_KeySize,
-                                                (char*)&adbRow+m_Database->m_ValueOffset,m_Database->m_ValueSize,MC_OPT_DB_DATABASE_TRANSACTIONAL);
-                                if(details.m_Flags & MC_ENT_FLAG_OFFSET_IS_SET)
-                                {
-                                    memset(adbRow.m_Key,0,MC_ENT_KEY_SIZE);
-                                    memcpy(adbRow.m_Key,details.m_Ref,MC_ENT_REF_SIZE);
-                                    adbRow.m_KeyType=MC_ENT_KEYTYPE_REF;                                    
-                                    err=m_Database->m_DB->Write((char*)&adbRow+m_Database->m_KeyOffset,m_Database->m_KeySize,
-                                                    (char*)&adbRow+m_Database->m_ValueOffset,m_Database->m_ValueSize,MC_OPT_DB_DATABASE_TRANSACTIONAL);
-                                }
-                                if(details.m_Flags & MC_ENT_FLAG_NAME_IS_SET)
-                                {
-                                    memset(adbRow.m_Key,0,MC_ENT_KEY_SIZE);
-                                    memcpy(adbRow.m_Key,details.m_Name,MC_ENT_MAX_NAME_SIZE);
-                                    adbRow.m_KeyType=MC_ENT_KEYTYPE_NAME;                                    
-                                    err=m_Database->m_DB->Write((char*)&adbRow+m_Database->m_KeyOffset,m_Database->m_KeySize,
-                                                    (char*)&adbRow+m_Database->m_ValueOffset,m_Database->m_ValueSize,MC_OPT_DB_DATABASE_TRANSACTIONAL);
-                                }
-                            }
-                            else
-                            {
-                                err=MC_ERR_INTERNAL_ERROR;
-                            }
-                        }
- */
                     }
                 }                       
             }
@@ -1256,6 +1311,7 @@ int mc_AssetDB::Commit()
         m_Ledger->SetZeroRow(&aldRow);
     }
     
+    m_Ledger->Flush();
     m_Ledger->Close();    
     
     if(err == MC_ERR_NOERROR)
@@ -1425,15 +1481,6 @@ int mc_AssetDB::RollBack(int block)
     }
 
     m_PrevPos=this_pos;
-
-    if(err == MC_ERR_NOERROR)
-    {
-        m_Ledger->GetRow(0,&aldRow);
-        aldRow.m_Block=block;
-        aldRow.m_PrevPos=m_PrevPos;
-        m_Ledger->SetZeroRow(&aldRow);
-    }
-    
     
     if(err == MC_ERR_NOERROR)
     {
@@ -1455,6 +1502,14 @@ int mc_AssetDB::RollBack(int block)
     {
         err=m_Database->m_DB->Commit(MC_OPT_DB_DATABASE_TRANSACTIONAL);
     }    
+    
+    if(err == MC_ERR_NOERROR)
+    {
+        m_Ledger->GetRow(0,&aldRow);
+        aldRow.m_Block=block;
+        aldRow.m_PrevPos=m_PrevPos;
+        m_Ledger->SetZeroRow(&aldRow);
+    }
     
     if(err == MC_ERR_NOERROR)
     {
@@ -1515,6 +1570,10 @@ int mc_AssetDB::FindEntityByTxID(mc_EntityDetails *entity,const unsigned char* t
     if(GetEntity(&aldRow))            
     {
         entity->Set(&aldRow);
+        if(m_TmpRelevantEntities->GetCount())
+        {
+            m_TmpRelevantEntities->Add(entity->GetTxID()+MC_AST_SHORT_TXID_OFFSET);
+        }
         return 1;
     }            
 
@@ -1542,10 +1601,34 @@ int mc_AssetDB::FindEntityByShortTxID (mc_EntityDetails *entity, const unsigned 
     if(GetEntity(&aldRow))            
     {
         entity->Set(&aldRow);
+        if(m_TmpRelevantEntities->GetCount())
+        {
+            m_TmpRelevantEntities->Add(entity->GetTxID()+MC_AST_SHORT_TXID_OFFSET);
+        }
         return 1;
     }            
 
     return 0;        
+}
+
+
+unsigned char *mc_AssetDB::CachedTxIDFromShortTxID(unsigned char *short_txid)
+{
+    int row;
+    row=m_ShortTxIDCache->Seek(short_txid);
+    if(row >= 0)
+    {
+        return m_ShortTxIDCache->GetRow(row)+m_ShortTxIDCache->m_KeySize;
+    }
+    
+    mc_EntityDetails entity;
+    if(FindEntityByShortTxID(&entity,short_txid))
+    {
+        m_ShortTxIDCache->Add(short_txid,entity.GetTxID());
+        return m_ShortTxIDCache->GetRow(m_ShortTxIDCache->GetCount()-1)+m_ShortTxIDCache->m_KeySize;        
+    }
+    
+    return NULL;
 }
 
 
@@ -1562,6 +1645,10 @@ int mc_AssetDB::FindEntityByRef (mc_EntityDetails *entity,const unsigned char* a
     if(GetEntity(&aldRow))            
     {
         entity->Set(&aldRow);
+        if(m_TmpRelevantEntities->GetCount())
+        {
+            m_TmpRelevantEntities->Add(entity->GetTxID()+MC_AST_SHORT_TXID_OFFSET);
+        }
         return 1;
     }            
 
@@ -1598,6 +1685,10 @@ int mc_AssetDB::FindEntityByName(mc_EntityDetails *entity,const char* name)
     if(GetEntity(&aldRow))            
     {
         entity->Set(&aldRow);
+        if(m_TmpRelevantEntities->GetCount())
+        {
+            m_TmpRelevantEntities->Add(entity->GetTxID()+MC_AST_SHORT_TXID_OFFSET);
+        }
         return 1;
     }            
 
@@ -1628,13 +1719,34 @@ int mc_AssetDB::FindEntityByFollowOn(mc_EntityDetails *entity,const unsigned cha
         }
         m_Ledger->Close();
         entity->Set(&aldRow);
+        if(m_TmpRelevantEntities->GetCount())
+        {
+            m_TmpRelevantEntities->Add(entity->GetTxID()+MC_AST_SHORT_TXID_OFFSET);
+        }
         return 1;
     }            
 
     return 0;
 }
 
-
+const unsigned char* mc_EntityDetails::GetParamUpgrades(int *size)
+{
+    uint32_t value_offset;
+    size_t value_size;
+    
+    if(m_LedgerRow.m_ScriptSize)
+    {
+        value_offset=mc_FindSpecialParamInDetailsScript(m_LedgerRow.m_Script,m_LedgerRow.m_ScriptSize,MC_ENT_SPRM_UPGRADE_CHAIN_PARAMS,&value_size);
+        if(value_offset != m_LedgerRow.m_ScriptSize)
+        {
+            *size=(int)value_size;
+            return m_LedgerRow.m_Script+value_offset;
+        }
+    }
+    
+    *size=0;
+    return NULL;
+}
 
 const char* mc_EntityDetails::GetName()
 {
@@ -1651,17 +1763,14 @@ const char* mc_EntityDetails::GetName()
             dname_buf[0]=0xff;
             value_offset=mc_FindNamedParamInDetailsScript(m_LedgerRow.m_Script,m_LedgerRow.m_ScriptSize,(char*)dname_buf,&value_size);
         }
-        if(mc_gState->m_Features->Streams())
-        {
-            if(value_offset < m_LedgerRow.m_ScriptSize)
-            {            
-                if(value_size == 2)
+        if(value_offset < m_LedgerRow.m_ScriptSize)
+        {            
+            if(value_size == 2)
+            {
+                if((char)m_LedgerRow.m_Script[value_offset] == '*')
                 {
-                    if((char)m_LedgerRow.m_Script[value_offset] == '*')
-                    {
-                        value_offset=m_LedgerRow.m_ScriptSize;
-                        value_size=0;
-                    }
+                    value_offset=m_LedgerRow.m_ScriptSize;
+                    value_size=0;
                 }
             }
         }
@@ -1686,6 +1795,11 @@ const unsigned char* mc_EntityDetails::GetRef()
 
 int mc_EntityDetails::IsUnconfirmedGenesis()
 {
+    if( (m_LedgerRow.m_Block > mc_gState->m_Assets->m_Block) && (m_LedgerRow.m_Offset >= 0) )                     // Can happen only when called from filter
+    {
+        return 1;
+    }
+
     return ((int)mc_GetLE(m_Ref+4,4)<0) ? 1 : 0; 
 }
 
@@ -1696,11 +1810,7 @@ const unsigned char* mc_EntityDetails::GetFullRef()
 
 const unsigned char* mc_EntityDetails::GetShortRef()
 {
-    if(mc_gState->m_Features->ShortTxIDAsAssetRef())
-    {
-        return GetTxID()+MC_AST_SHORT_TXID_OFFSET;
-    }    
-    return m_Ref;
+    return GetTxID()+MC_AST_SHORT_TXID_OFFSET;
 }
 
 const unsigned char* mc_EntityDetails::GetScript()
@@ -1717,14 +1827,7 @@ int mc_EntityDetails::GetAssetMultiple()
     multiple=1; 
 
     ptr=NULL;
-    if(mc_gState->m_Features->SpecialParamsInDetailsScript())    
-    {
-        ptr=(void*)GetSpecialParam(MC_ENT_SPRM_ASSET_MULTIPLE,&size);
-    }
-    else
-    {
-        ptr=(void*)GetParam("multiple",&size);
-    }    
+    ptr=(void*)GetSpecialParam(MC_ENT_SPRM_ASSET_MULTIPLE,&size);
     
     if(ptr)
     {
@@ -1740,6 +1843,26 @@ int mc_EntityDetails::GetAssetMultiple()
     }
     
     return multiple;
+}
+
+uint32_t mc_EntityDetails::GetFilterType()
+{
+    uint32_t filter_type=0;
+    size_t size;
+    void* ptr;
+    
+    ptr=NULL;
+    ptr=(void*)GetSpecialParam(MC_ENT_SPRM_FILTER_TYPE,&size);
+    
+    if(ptr)
+    {
+        if(size==sizeof(filter_type))
+        {
+            filter_type=(uint32_t)mc_GetLE(ptr,size);
+        }
+    }
+            
+    return filter_type;
 }
 
 int mc_EntityDetails::IsFollowOn()
@@ -1766,16 +1889,75 @@ int mc_EntityDetails::AllowedFollowOns()
     return 0;
 }
 
+uint32_t mc_EntityDetails::Permissions()
+{
+    return m_Permissions;
+}
+
+uint32_t mc_EntityDetails::Restrictions()
+{
+    return m_Restrictions;
+}
+
+
 int mc_EntityDetails::AnyoneCanWrite()
 {
     unsigned char *ptr;
     size_t bytes;
+
+    if(m_Permissions & MC_PTP_SPECIFIED)
+    {
+        if(mc_gState->m_Features->OffChainData())
+        {            
+            if(m_ScriptPermissions & MC_PTP_WRITE)
+            {
+                return 0;
+            }
+            return 1;            
+        }
+    }
+    
     ptr=(unsigned char *)GetSpecialParam(MC_ENT_SPRM_ANYONE_CAN_WRITE,&bytes);
     if(ptr)
     {
         if((bytes>0) && (bytes<=4))
         {
             return (int)mc_GetLE(ptr,bytes);
+        }
+    }
+    return 0;
+}
+
+uint32_t mc_EntityDetails::UpgradeStartBlock()
+{
+    unsigned char *ptr;
+    size_t bytes;
+    ptr=(unsigned char *)GetSpecialParam(MC_ENT_SPRM_UPGRADE_START_BLOCK,&bytes);
+    if(ptr)
+    {
+        if((bytes>0) && (bytes<=4))
+        {
+            return (int)mc_GetLE(ptr,bytes);
+        }
+    }
+    return 0;
+}
+
+int mc_EntityDetails::UpgradeProtocolVersion()
+{
+    unsigned char *ptr;
+    size_t bytes;
+    int version;
+    ptr=(unsigned char *)GetSpecialParam(MC_ENT_SPRM_UPGRADE_PROTOCOL_VERSION,&bytes);
+    if(ptr)
+    {
+        if((bytes>0) && (bytes<=4))
+        {
+            version=(int)mc_GetLE(ptr,bytes);
+            if(version > 0)
+            {
+                return version;
+            }
         }
     }
     return 0;
@@ -1901,6 +2083,33 @@ void mc_AssetDB::Dump()
     
 }
 
+uint32_t mc_AssetDB::MaxEntityType()
+{
+    if(mc_gState->m_Features->Filters() == 0)
+    {
+        return MC_ENT_TYPE_UPGRADE;
+    }
+    if(mc_gState->m_Features->LicenseTokens() == 0)
+    {
+        return MC_ENT_TYPE_FILTER;
+    }
+    return MC_ENT_TYPE_MAX; 
+}
+
+int mc_AssetDB::MaxScriptSize()
+{
+    if(mc_gState->m_Features->Filters() == 0)
+    {
+        return MC_ENT_MAX_SCRIPT_SIZE_BEFORE_FILTERS;
+    }
+    return MC_ENT_MAX_SCRIPT_SIZE; 
+}
+
+int mc_AssetDB::MaxStoredIssuers()
+{
+    return MC_ENT_MAX_STORED_ISSUERS; 
+}
+
 mc_Buffer *mc_AssetDB::GetEntityList(mc_Buffer *old_result,const void* txid,uint32_t entity_type)
 {    
     mc_EntityDBRow adbRow;
@@ -1940,10 +2149,6 @@ mc_Buffer *mc_AssetDB::GetEntityList(mc_Buffer *old_result,const void* txid,uint
         memcpy((unsigned char*)&adbRow+m_Database->m_ValueOffset,ptr,dbvalue_len);   
         while(ptr)
         {
-            if(mc_gState->m_Features->FollowOnIssues() == 0)
-            {
-                adbRow.m_EntityType=MC_ENT_TYPE_ASSET;
-            }
             if(adbRow.m_KeyType == MC_ENT_KEYTYPE_TXID)
             {
                 if( (entity_type == 0) || (adbRow.m_EntityType == entity_type) )
@@ -2058,12 +2263,9 @@ mc_Buffer *mc_AssetDB::GetFollowOns(const void* txid)
             memcpy(&aldRow,m_MemPool->GetRow(i),sizeof(mc_EntityLedgerRow));            
             if( (aldRow.m_KeyType  & MC_ENT_KEYTYPE_MASK) == MC_ENT_KEYTYPE_TXID)
             {
-                if(aldRow.m_FirstPos != (-i-1))
+                if(aldRow.m_FirstPos == first_pos)
                 {
-                    if(aldRow.m_FirstPos == first_pos)
-                    {
-                        result->Add(aldRow.m_Key,NULL);                
-                    }
+                    result->Add(aldRow.m_Key,NULL);                
                 }
             }
         }
@@ -2092,10 +2294,6 @@ mc_Buffer *mc_AssetDB::GetFollowOns(const void* txid)
                 }
             }
             m_Ledger->Close();
-        }
-        else
-        {
-            result->Add(aldRow.m_Key,NULL);                            
         }
     }
     

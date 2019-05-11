@@ -1,7 +1,7 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Original code was distributed under the MIT software license.
-// Copyright (c) 2014-2017 Coin Sciences Ltd
+// Copyright (c) 2014-2019 Coin Sciences Ltd
 // MultiChain code distributed under the GPLv3 license, see COPYING file.
 
 #include "structs/amount.h"
@@ -15,7 +15,7 @@
 #include "rpcserver.h"
 #include "utils/util.h"
 #ifdef ENABLE_WALLET
-#include "wallet/db.h"
+#include "wallet/dbwrap.h"
 #include "wallet/wallet.h"
 #endif
 
@@ -25,6 +25,7 @@
 
 #include "json/json_spirit_utils.h"
 #include "json/json_spirit_value.h"
+#include "rpcwallet.h"
 
 using namespace json_spirit;
 using namespace std;
@@ -85,7 +86,7 @@ Value getgenerate(const Array& params, bool fHelp)
     if (fHelp || params.size() != 0)
         throw runtime_error("Help message not found\n");
 
-    return GetBoolArg("-gen", false);
+    return GetBoolArg("-gen", true);
 }
 
 
@@ -95,13 +96,54 @@ Value setgenerate(const Array& params, bool fHelp)
         throw runtime_error("Help message not found\n");
 
     if (pwalletMain == NULL)
-        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (disabled)");
+        throw JSONRPCError(RPC_NOT_SUPPORTED, "Method not found (disabled)");
 
+    set<CTxDestination> miner_addresses;
+    set<CTxDestination> *lpMinerAddresses;
+    vector<CTxDestination> addresses;
+    
+    lpMinerAddresses=NULL;
+    
     bool fGenerate = true;
     if (params.size() > 0)
-        fGenerate = params[0].get_bool();
+    {
+        if(params[0].type() == bool_type)
+        {
+            fGenerate = params[0].get_bool();            
+        }
+        else
+        {
+            if(Params().MineBlocksOnDemand())
+            {
+                if(params[0].type() == str_type)
+                {
+                    addresses=ParseAddresses(params[0].get_str(),false,false);
+                    if(addresses.size())
+                    {
+                        for(int i=0;i<(int)addresses.size();i++)
+                        {
+                            miner_addresses.insert(addresses[i]);
+                        }
+                        lpMinerAddresses=&miner_addresses;
+                    }
+                }
+                else
+                {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid value for 'generate' field, should be boolean or string");                                                                                
+                }
+            }
+            else
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid value for 'generate' field, should be boolean");                                                                                
+            }
+        }
+    }
 
-    int nGenProcLimit = -1;
+    int nGenProcLimit = 1;
+    if(Params().Interval() > 0)
+    {
+        nGenProcLimit = -1;
+    }
     if (params.size() > 1)
     {
         nGenProcLimit = params[1].get_int();
@@ -128,23 +170,53 @@ Value setgenerate(const Array& params, bool fHelp)
         Array blockHashes;
         while (nHeight < nHeightEnd)
         {
-            auto_ptr<CBlockTemplate> pblocktemplate(CreateNewBlockWithKey(reservekey));
+            int canMine=0;
+            CBlockIndex *pindexPrev;
+            auto_ptr<CBlockTemplate> pblocktemplate(CreateNewBlockWithDefaultKey(pwalletMain,&canMine,lpMinerAddresses,&pindexPrev));
+//            auto_ptr<CBlockTemplate> pblocktemplate(CreateNewBlockWithKey(reservekey));
             if (!pblocktemplate.get())
-                throw JSONRPCError(RPC_INTERNAL_ERROR, "Wallet keypool empty");
+            {
+                if(mc_gState->m_NetworkParams->IsProtocolMultichain())
+                {
+                    if(nGenerate > 1)
+                    {
+                        throw JSONRPCError(RPC_INSUFFICIENT_PERMISSIONS, "Couldn't find enough wallet addresses with mining permission to mine given number of blocks");
+                    }
+                    else
+                    {
+                        throw JSONRPCError(RPC_INSUFFICIENT_PERMISSIONS, "Couldn't find wallet address with mining permission");                        
+                    }
+                }
+                else
+                {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR, "Wallet keypool empty");
+                }
+            }
+                
+            int64_t nStart = GetTimeMillis();
+            int64_t nCount=1;
             CBlock *pblock = &pblocktemplate->block;
             {
                 LOCK(cs_main);
 /* MCHN START */                
-                IncrementExtraNonce(pblock, chainActive.Tip(), nExtraNonce,pwalletMain);
+                IncrementExtraNonce(pblock, pindexPrev, nExtraNonce,pwalletMain);
+                CreateBlockSignature(pblock,BLOCKSIGHASH_NO_SIGNATURE,pwalletMain);
 //                IncrementExtraNonce(pblock, chainActive.Tip(), nExtraNonce);
 /* MCHN START */                
             }
-            while (!CheckProofOfWork(pblock->GetHash(), pblock->nBits)) {
+            while (!CheckProofOfWork(pblock->GetHash(), pblock->nBits, true)) {
                 // Yes, there is a chance every nonce could fail to satisfy the -regtest
                 // target -- 1 in 2^(2^32). That ain't gonna happen.
                 ++pblock->nNonce;
+                CreateBlockSignature(pblock,BLOCKSIGHASH_NO_SIGNATURE,pwalletMain);     
+                nCount++;
             }
+            int64_t nEnd = GetTimeMillis();
+            LogPrintf("RPC Miner      : %ld hashes were tried in %ldms (%8.3fh/ms)\n",nCount,nEnd-nStart,
+                    (nEnd-nStart >0 ) ? (double)nCount/((double)nEnd-(double)nStart) : 0);
             CValidationState state;
+            LogPrintf("RPC Miner      : Block Found - %s, prev: %s, height: %d, txs: %d\n",
+                    pblock->GetHash().GetHex(),pblock->hashPrevBlock.ToString().c_str(),nHeight+1,(int)pblock->vtx.size());
             if (!ProcessNewBlock(state, NULL, pblock))
                 throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
             ++nHeight;
@@ -166,9 +238,10 @@ Value gethashespersec(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() != 0)
         throw runtime_error("Help message not found\n");
-
+/*
     if (GetTimeMillis() - nHPSTimerStart > 8000)
         return (int64_t)0;
+ */ 
     return (int64_t)dHashesPerSec;
 }
 #endif
@@ -185,7 +258,7 @@ Value getmininginfo(const Array& params, bool fHelp)
     obj.push_back(Pair("currentblocktx",   (uint64_t)nLastBlockTx));
     obj.push_back(Pair("difficulty",       (double)GetDifficulty()));
     obj.push_back(Pair("errors",           GetWarnings("statusbar")));
-    obj.push_back(Pair("genproclimit",     (int)GetArg("-genproclimit", -1)));
+    obj.push_back(Pair("genproclimit",     (int)GetArg("-genproclimit", 1)));
     obj.push_back(Pair("networkhashps",    getnetworkhashps(params, false)));
     obj.push_back(Pair("pooledtx",         (uint64_t)mempool.size()));
     obj.push_back(Pair("testnet",          Params().TestnetToBeDeprecatedFieldRPC()));
@@ -207,6 +280,8 @@ Value prioritisetransaction(const Array& params, bool fHelp)
     if (fHelp || params.size() != 3)
         throw runtime_error("Help message not found\n");
 
+    throw JSONRPCError(RPC_NOT_SUPPORTED, "Transaction prioritization is not supported in this version of MultiChain");        
+    
 /* MCHN START */    
 //    uint256 hash = ParseHashStr(params[0].get_str(), "txid");
 
@@ -243,6 +318,8 @@ Value getblocktemplate(const Array& params, bool fHelp)
     if (fHelp || params.size() > 1)
         throw runtime_error("Help message not found\n");
 
+    throw JSONRPCError(RPC_NOT_SUPPORTED, "getblocktemplate is not supported in this version of MultiChain");        
+    
     std::string strMode = "template";
     Value lpval = Value::null;
     if (params.size() > 0)
@@ -486,14 +563,21 @@ Value submitblock(const Array& params, bool fHelp)
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
 
     uint256 hash = block.GetHash();
-    BlockMap::iterator mi = mapBlockIndex.find(hash);
-    if (mi != mapBlockIndex.end()) {
-        CBlockIndex *pindex = mi->second;
-        if (pindex->IsValid(BLOCK_VALID_SCRIPTS))
-            return "duplicate";
-        if (pindex->nStatus & BLOCK_FAILED_MASK)
-            return "duplicate-invalid";
-        // Otherwise, we might only have the header - process the block before returning
+
+    bool fBlockPresent = false;
+    {
+         LOCK(cs_main);    
+         
+        BlockMap::iterator mi = mapBlockIndex.find(hash);
+        if (mi != mapBlockIndex.end()) {
+            CBlockIndex *pindex = mi->second;
+            if (pindex->IsValid(BLOCK_VALID_SCRIPTS))
+                return "duplicate";
+            if (pindex->nStatus & BLOCK_FAILED_MASK)
+                return "duplicate-invalid";
+            // Otherwise, we might only have the header - process the block before returning
+        }
+        fBlockPresent=true;
     }
 
     CValidationState state;
@@ -501,7 +585,8 @@ Value submitblock(const Array& params, bool fHelp)
     RegisterValidationInterface(&sc);
     bool fAccepted = ProcessNewBlock(state, NULL, &block);
     UnregisterValidationInterface(&sc);
-    if (mi != mapBlockIndex.end())
+    
+    if (fBlockPresent)        
     {
         if (fAccepted && !sc.found)
             return "duplicate-inconclusive";
